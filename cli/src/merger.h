@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <filesystem>
+#include <string>
 #include <pybind11/pybind11.h>
 #include "pybind11/stl.h"
 #include "util.h"
@@ -10,17 +11,61 @@
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
 
-/**
- * Этот комментарий нужен для записывания мгновенных идей.
- * По поводу вершин: по пользовательскому(!) ПК мы можем
- * определить внутренний id графаря, а по внутреннему id
- * можно посчитать чанк и даже позицию в нем!
- * 
- * Звучит как какая-то незаконченная идея, но возможно в
- * будущем я вспомню к чему это было, и поражусь.
- */
-
 namespace py = pybind11;
+
+int extract_tailing_number(const std::filesystem::path& filename) {
+    std::string name = filename.stem().string();
+
+    int end = name.size() - 1;
+    while (end >= 0 && std::isdigit(static_cast<unsigned char>(name[end]))) {
+        end--;
+    }
+
+    if (end == static_cast<int>(name.size()) - 1)
+        return -1;  // chunks have only positive numbers
+
+    std::string number = name.substr(end + 1);
+    return std::stoi(number);
+}
+
+template <typename ArrowArrayType>
+void MapPK2row(const std::shared_ptr<arrow::ChunkedArray>& column,
+               std::unordered_map<int64_t, graphar::IdType>& map) {
+
+    int64_t row_offset = 0;
+    for (int64_t chunk_idx = 0; chunk_idx < column->num_chunks(); ++chunk_idx) {
+        auto chunk = column->chunk(chunk_idx);
+        auto arr = std::static_pointer_cast<ArrowArrayType>(chunk); 
+        const auto* data = arr->raw_values();
+
+        for (int64_t i = 0; i < arr->length(); ++i) {
+            map[static_cast<int64_t>(data[i])] = row_offset + i;
+        }
+        row_offset += arr->length();
+    }
+}
+
+template <typename ArrowArrayType>
+void CollectRowNumers(const std::shared_ptr<arrow::ChunkedArray>& column,
+                      arrow::Int64Builder& pk2row,
+                      std::unordered_map<int64_t, graphar::IdType>& map) {
+
+    for (int64_t chunk_idx = 0; chunk_idx < column->num_chunks(); ++chunk_idx) {
+        auto chunk = column->chunk(chunk_idx);
+        auto arr = std::static_pointer_cast<ArrowArrayType>(chunk); 
+        const auto* data = arr->raw_values();
+
+        for (int64_t i = 0; i < arr->length(); ++i) {
+
+            auto val = map.find(data[i]);
+            if (val == map.end()) {
+                pk2row.AppendNull();
+            } else {
+                pk2row.Append(val->second);
+            }
+        }
+    }
+}
 
 std::string DoMerge(const py::dict& config_dict)
 {
@@ -120,19 +165,6 @@ std::string DoMerge(const py::dict& config_dict)
                                     vertex_info->GetPathPrefix(pg_with_user_PK).value();
         logger("  Looking for original data in "+path_original);
 
-        // 1.3.2 Read graph's PG that contains user's PK
-        std::shared_ptr<arrow::Table> table;
-        {
-            std::vector<std::string> column_names = {graphar::GeneralParams::kVertexIndexCol, vertex.join_on};
-            std::vector<std::shared_ptr<arrow::Table>> file_tables;
-            for (const auto& file : std::filesystem::directory_iterator(path_original)) {
-                 // We should change that if we want graphar not only in parquet
-                file_tables.push_back(GetDataFromParquetFile(file.path().string(), column_names));
-            }
-            table = ConcatenateTables(file_tables).ValueOrDie();
-            logger("  Original vertices read.");
-        }
-
         // 1.3.3 Save map[user_pk] = graphar_index
         // note: only int64 keys are alowed
         // TODO: check key is int in config
@@ -154,8 +186,8 @@ std::string DoMerge(const py::dict& config_dict)
             {
                 std::vector<std::shared_ptr<arrow::Table>> file_tables(source.path.size());
                 for (int i = 0; i < source.path.size(); ++i) {
-                file_tables[i] = GetDataFromFile(source.path[i], new_column_names, source.delimiter,
-                                    source.file_type);
+                    file_tables[i] = GetDataFromFile(source.path[i], new_column_names, source.delimiter,
+                                        source.file_type);
                 }
                 std::shared_ptr<arrow::Table> table = ConcatenateTables(file_tables).ValueOrDie();
                 vertex_tables.push_back(table);
@@ -165,13 +197,60 @@ std::string DoMerge(const py::dict& config_dict)
         std::shared_ptr<arrow::Table> merged_vertex_table = MergeTables(vertex_tables);
 
         // 1.3.4 Save map[user_pk] = row-number-in-input-table
-        // note: only int64 keys are alowed
+        // note: only int64/int32 keys are allowed
         // TODO: check key is int in config
+        logger("  Mapping PK from new data to its row in new data.");
         std::unordered_map<int64_t, graphar::IdType> pk2row_num;
+        auto pk_column = merged_vertex_table->GetColumnByName(vertex.join_on);
+        switch (pk_column->chunk(0)->type_id()) {
+            case arrow::Type::INT32:
+                MapPK2row<arrow::Int32Array>(pk_column, pk2row_num);
+                break;
+            case arrow::Type::INT64:
+                MapPK2row<arrow::Int64Array>(pk_column, pk2row_num);
+                break;
+            default:
+                throw std::runtime_error("Unsupported type of PK in user files.");
+        }
 
-        auto pk_column = table->GetColumnByName(vertex.join_on);  // note: mey be a mistake
-        
+        // 1.3.5 For each chunk in GraphAr collect rows in additional data that match it
+        std::vector<std::string> column_names = {vertex.join_on};
 
+        for (const auto& file : std::filesystem::directory_iterator(path_original)) {
+            // read one vertex chunk in GraphAr format
+            std::shared_ptr<arrow::ChunkedArray> vertex_chunk_column = 
+                            GetDataFromParquetFile(file.path().string(), column_names)->column(0);
+            arrow::Int64Builder builder;
+            int vertex_chunk_idx = extract_tailing_number(file);
+            logger("    Merging data to vertex chunk "+std::to_string(vertex_chunk_idx));
+
+            // for each PK find the corresponding line number in additional attributes
+            switch(vertex_chunk_column->chunk(0)->type_id()) {
+                case arrow::Type::INT32:
+                    CollectRowNumers<arrow::Int32Array>(vertex_chunk_column, builder, pk2row_num);
+                    break;
+                case arrow::Type::INT64:
+                    CollectRowNumers<arrow::Int64Array>(vertex_chunk_column, builder, pk2row_num);
+                    break;
+                default:
+                    throw std::runtime_error("Unsupported type of PK in provided GraphAr data.");
+            }
+
+            // collect the result
+            std::shared_ptr<arrow::Array> indices_order;
+            builder.Finish(&indices_order);
+
+            // exctract data in correct order
+            arrow::compute::TakeOptions options;
+            auto maybe_sorted_chunk = arrow::compute::Take(merged_vertex_table, indices_order, options);
+            auto sorted_chunk = maybe_sorted_chunk.ValueOrDie().table();
+
+            // Write table
+            for (const auto& property_group : pgs) {
+                vertex_prop_writer->WriteTable(sorted_chunk, property_group,
+                                                vertex_chunk_idx);
+            }
+        }
     }
 
     return "Merged successfully!";
