@@ -149,6 +149,7 @@ void CollectRowNumers(const std::shared_ptr<arrow::ChunkedArray>& column,
 std::string DoMerge(const py::dict& config_dict)
 {
     logger("Mege started");
+    int num_threads = 1;  // TODO: OMP
 
     // getting config data
     MergeConfig merge_config;
@@ -160,6 +161,11 @@ std::string DoMerge(const py::dict& config_dict)
     fs::path save_path = merge_config.graphar_config.path;
     graphar::VertexInfoVector vertices_info;
     auto version = graphar::InfoVersion::Parse(merge_config.graphar_config.version).value();
+
+    std::unordered_map<std::string, graphar::IdType> vertex_chunk_sizes;
+    for (const auto& vertex_info : graph_info->GetVertexInfos()) {
+        vertex_chunk_sizes[vertex_info->GetType()] = vertex_info->GetChunkSize();
+    }
 
     // 0. Vertex load
     // 1. Read GraphAr Vertex info
@@ -481,6 +487,60 @@ std::string DoMerge(const py::dict& config_dict)
             logger("    Edge src&dst ids calculated.");
 
             // 2.2.4 Work with each adj_lists type required by user
+            for (const auto& adj_list : edge.adj_lists) {
+                logger("    Working with adj_list aligned by "+adj_list.aligned_by);
+
+                auto adj_lst = graphar::CreateAdjacentList(
+                                    graphar::OrderedAlignedToAdjListType(adj_list.ordered,
+                                                                        adj_list.aligned_by),
+                                    graphar::StringToFileType(adj_list.file_type)
+                );
+                
+                // calculate number of chunks according to the number of src/dst vertices
+                int num_of_chunks = 0;
+                int64_t vertex_chunk_size = 0;
+                bool aligned_by_src = true;
+
+                if(adj_lst->GetType() == graphar::AdjListType::ordered_by_source ||
+                   adj_lst->GetType() == graphar::AdjListType::unordered_by_source) {
+                    vertex_chunk_size = vertex_chunk_sizes[edge.src_type];
+                    num_of_chunks = vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)).size() / 
+                                    vertex_chunk_size + 1;
+                } else {
+                    aligned_by_src = false;
+                    vertex_chunk_size = vertex_chunk_sizes[edge.dst_type];
+                    num_of_chunks = vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)).size() / 
+                                    vertex_chunk_size + 1;
+                }
+
+                // map edge row to its chunk
+                std::vector<std::vector<std::vector<int64_t>>> edge_to_chunk_mapping(
+                    num_threads,
+                    std::vector<std::vector<int64_t>>(num_of_chunks)
+                );
+
+                // TODO: omp
+                logger("    Mapping edge row to its chunk.");
+                for(int64_t i = 0; i < edges_translation.size(); ++i) {
+
+                    // define graphar vertex id 
+                    int64_t vertex_id = -1;
+                    if(aligned_by_src) {
+                        vertex_id = edges_translation[i].src;
+                    } else {
+                        vertex_id = edges_translation[i].dst;
+                    }
+
+                    // add row number of edge in table into chunk
+                    edge_to_chunk_mapping[0][vertex_id/vertex_chunk_size].push_back(i);
+                }
+                logger("    Mapping complete.");
+
+                // Edges are sorted by their chunks, we only need to:
+                // 1) Sort them the same way as in the original adj_lists (read only one edge chunk for that).
+                // 2) Create table by extracting values on the saved rows in correct order.
+                // 3) Save table to a specific directory.
+            }
 
         }
     }
