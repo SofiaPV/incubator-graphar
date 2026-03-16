@@ -3,6 +3,7 @@
 #include <iostream>
 #include <filesystem>
 #include <string>
+#include <set>
 #include <pybind11/pybind11.h>
 #include "pybind11/stl.h"
 #include "util.h"
@@ -36,12 +37,51 @@ void MapPK2row(const std::shared_ptr<arrow::ChunkedArray>& column,
     for (int64_t chunk_idx = 0; chunk_idx < column->num_chunks(); ++chunk_idx) {
         auto chunk = column->chunk(chunk_idx);
         auto arr = std::static_pointer_cast<ArrowArrayType>(chunk); 
-        const auto* data = arr->raw_values();
+        const auto* data = arr->raw_values();  // TODO: use Value()
 
         for (int64_t i = 0; i < arr->length(); ++i) {
             map[static_cast<int64_t>(data[i])] = row_offset + i;
         }
         row_offset += arr->length();
+    }
+}
+
+
+// TODO: remake, take table, key-value columns, map
+/* 
+* Function suggests that CombineChunks() was already performed for the input table.
+*/
+template <typename KeyColumnType, typename ValueColumnType>
+void MapValues(const std::string& key_column_name,
+               const std::string& value_column_name,
+               const std::shared_ptr<arrow::Table> input_table,
+               std::unordered_map<int64_t, graphar::IdType>& map) {
+
+    std::shared_ptr<arrow::Table> table = input_table->CombineChunks().ValueOrDie();
+
+    auto key_col_ptr = table->GetColumnByName(key_column_name);
+    auto val_col_ptr = table->GetColumnByName(value_column_name);
+
+    if (!key_col_ptr || !val_col_ptr) {
+        throw std::runtime_error("MapValues(): One of the columns not found in table");
+    }
+
+    auto key_chunk = std::static_pointer_cast<KeyColumnType>(key_col_ptr->chunk(0));
+    auto val_chunk = std::static_pointer_cast<ValueColumnType>(val_col_ptr->chunk(0));
+
+    if (key_chunk->length() != val_chunk->length()) {
+        throw std::runtime_error("MapValues(): Key and value columns lengths do not match");
+    }
+
+    for (int64_t i = 0; i < key_chunk->length(); ++i) {
+        if (key_chunk->IsNull(i) || val_chunk->IsNull(i)) {
+            continue;
+        }
+
+        int64_t key = static_cast<int64_t>(key_chunk->Value(i));
+        int64_t value = static_cast<int64_t>(val_chunk->Value(i));
+
+        map[key] = value;
     }
 }
 
@@ -94,12 +134,12 @@ std::string DoMerge(const py::dict& config_dict)
     for (const auto& vertex : merge_config.merge_schema.vertices) {
 
         // 1.1 Go to the graph description yml's and load information about this vertex
-        logger("Processing vertex <"+vertex.type+">.");
+        logger("  Processing vertex <"+vertex.type+">.");
         auto vertex_info = graph_info->GetVertexInfo(vertex.type);
 
         // 1.2 Read info about property groups that will be added and add to the current information
         // TODO: note: this looks a lot like importer.h, we probably need refactoring 
-        logger("  Reading PG that should be added.");
+        logger("    Reading PG that should be added.");
         std::string primary_key;
         auto pgs = std::vector<std::shared_ptr<graphar::PropertyGroup>>(vertex_info->GetPropertyGroups());
         int number_of_pgroups = pgs.size();
@@ -126,7 +166,7 @@ std::string DoMerge(const py::dict& config_dict)
                 vertex.type+"_properties_"+std::to_string(number_of_pgroups));
             pgs.emplace_back(property_group);
         }
-        logger("  Additional PG added to config.");
+        logger("    Additional PG added to config.");
 
         // Update vertex info
         auto vertex_info_updated =
@@ -136,7 +176,7 @@ std::string DoMerge(const py::dict& config_dict)
         auto file_name = vertex.type + ".vertex.yaml";
         auto res = vertex_info_updated->Save(save_path / file_name);
         vertices_info.push_back(vertex_info_updated);
-        logger("  Saved updated vertex description.");
+        logger("    Saved updated vertex description.");
 
         // Create vertex property writer to save new data
         auto save_path_str = save_path.string();
@@ -163,15 +203,7 @@ std::string DoMerge(const py::dict& config_dict)
         }
         std::string path_original = merge_config.graphar_config.path + '/' + 
                                     vertex_info->GetPathPrefix(pg_with_user_PK).value();
-        logger("  Looking for original data in "+path_original);
-
-        // 1.3.3 Save map[user_pk] = graphar_index
-        // note: only int64 keys are alowed
-        // TODO: check key is int in config
-        /*std::unordered_map<int64_t, graphar::IdType> pk2index = TableToUnorderedMapInt64(
-                    table, vertex.join_on, graphar::GeneralParams::kVertexIndexCol
-                );
-        logger("  Map created.");*/
+        logger("    Looking for original data in "+path_original);
 
         // 1.3.3 Read new data
         std::vector<std::shared_ptr<arrow::Table>> vertex_tables;
@@ -199,7 +231,7 @@ std::string DoMerge(const py::dict& config_dict)
         // 1.3.4 Save map[user_pk] = row-number-in-input-table
         // note: only int64/int32 keys are allowed
         // TODO: check key is int in config
-        logger("  Mapping PK from new data to its row in new data.");
+        logger("    Mapping PK from new data to its row in new data.");
         std::unordered_map<int64_t, graphar::IdType> pk2row_num;
         auto pk_column = merged_vertex_table->GetColumnByName(vertex.join_on);
         switch (pk_column->chunk(0)->type_id()) {
@@ -222,7 +254,7 @@ std::string DoMerge(const py::dict& config_dict)
                             GetDataFromParquetFile(file.path().string(), column_names)->column(0);
             arrow::Int64Builder builder;
             int vertex_chunk_idx = extract_tailing_number(file);
-            logger("    Merging data to vertex chunk "+std::to_string(vertex_chunk_idx));
+            logger("      Merging data to vertex chunk "+std::to_string(vertex_chunk_idx));
 
             // for each PK find the corresponding line number in additional attributes
             switch(vertex_chunk_column->chunk(0)->type_id()) {
@@ -251,7 +283,74 @@ std::string DoMerge(const py::dict& config_dict)
                                                 vertex_chunk_idx);
             }
         }
+        logger("  Processed vertex <"+vertex.type+">.");
     }
+
+    // 2. Add attributes to edges
+    logger("Processing edges.");
+
+    // 2.1. We should know graphar ids of vertices to which we refer in edges
+    std::map<std::pair<std::string, std::string>, 
+           std::unordered_map<int64_t, graphar::IdType>> vertex_prop_index_map;
+    std::unordered_map<std::string, std::set<std::string>>
+      vertex_props_in_edges;
+
+    // 2.1.1 Collect types of vertices connected by each type of edge
+    //       and properties to which edges refer.
+    for (const auto& edge : merge_config.merge_schema.edges) {
+        vertex_props_in_edges[edge.src_type].insert(edge.src_prop);
+        vertex_props_in_edges[edge.dst_type].insert(edge.dst_prop);
+    }
+
+    // 2.1.2 For each vertex type used in edges, find properties which
+    //       edges refer to, read property & id columns and save property->id
+    //       relation in the unordered_map.
+    for(auto vertex : vertices_info) {
+        if (vertex_props_in_edges.find(vertex->GetType()) == vertex_props_in_edges.end()) 
+            continue;
+        
+        for (const auto& vertex_prop : vertex_props_in_edges[vertex->GetType()]) {
+            if (vertex_prop_index_map.find(std::make_pair(vertex->GetType(), vertex_prop)) != vertex_prop_index_map.end())
+                continue;
+            
+            // find PG that contains this property
+            std::string path_to_pg;
+            for(auto& pg : vertex->GetPropertyGroups()) {
+                if (pg->HasProperty(vertex_prop)) {
+                    path_to_pg = pg->GetPrefix();
+                }
+            }
+            
+            std::string path_to_graphar_pg = merge_config.graphar_config.path + '/' + 
+                                                vertex->GetPrefix() + '/' + path_to_pg;
+            logger("  Looking for property '"+ vertex_prop + "' in " + path_to_graphar_pg);
+            
+            // read tables from directory and save property_value -> vertex_id relation
+            std::unordered_map<int64_t, graphar::IdType> property_to_id_map;  // TODO: reserve
+            std::vector<std::string> column_names = {vertex_prop, graphar::GeneralParams::kVertexIndexCol};
+            for (const auto& file : std::filesystem::directory_iterator(path_to_graphar_pg)) {
+                std::shared_ptr<arrow::Table> vertex_chunk_prop_columns = 
+                                GetDataFromParquetFile(file.path().string(), column_names);
+                switch(vertex_chunk_prop_columns->GetColumnByName(vertex_prop)->chunk(0)->type_id()) {
+                    case arrow::Type::INT32:
+                        MapValues<arrow::Int32Array, arrow::Int64Array>(vertex_prop, graphar::GeneralParams::kVertexIndexCol, 
+                                                                        vertex_chunk_prop_columns, property_to_id_map);
+                        break;
+                    case arrow::Type::INT64:
+                        MapValues<arrow::Int64Array, arrow::Int64Array>(vertex_prop, graphar::GeneralParams::kVertexIndexCol, 
+                                                                        vertex_chunk_prop_columns, property_to_id_map);
+                        break;
+                    default:
+                        throw std::runtime_error("Unsupported type of PK in provided GraphAr data.");
+                }
+            }
+            logger("  Property '" + vertex_prop + "' mapping to GraphAr id saved.");
+            // save map for future usage
+            vertex_prop_index_map[std::make_pair(vertex->GetType(), vertex_prop)] = property_to_id_map;
+        }
+    }
+
+    // 2.2 
 
     return "Merged successfully!";
 }
