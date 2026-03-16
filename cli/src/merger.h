@@ -14,6 +14,12 @@
 
 namespace py = pybind11;
 
+struct EdgeSmall {
+    int64_t src = -1;
+    int64_t dst = -1;
+    int64_t row = -1;
+};
+
 int extract_tailing_number(const std::filesystem::path& filename) {
     std::string name = filename.stem().string();
 
@@ -82,6 +88,39 @@ void MapValues(const std::string& key_column_name,
         int64_t value = static_cast<int64_t>(val_chunk->Value(i));
 
         map[key] = value;
+    }
+}
+
+/**
+ * Having src&dst property of edge, finds it src&dst GraphAr index using
+ * prop_index_map and saves in edge_translation[row_number_in_input_table].
+ * The function suggests that CombineChunks() was already applied to the 
+ * table.
+ */
+template <typename SrcColumnType, typename DstColumnType>
+void MakeEdgeData(const std::shared_ptr<arrow::ChunkedArray> src_column,
+                  const std::shared_ptr<arrow::ChunkedArray> dst_column,
+                  std::vector<EdgeSmall>& edge_translation,
+                  const std::unordered_map<int64_t, graphar::IdType>& src_prop_index_map,
+                  const std::unordered_map<int64_t, graphar::IdType>& dst_prop_index_map) {
+
+    auto src_chunk = std::static_pointer_cast<SrcColumnType>(src_column->chunk(0));
+    auto dst_chunk = std::static_pointer_cast<DstColumnType>(dst_column->chunk(0));
+
+    // both src & dst are not nullable, use raw_values
+    const auto* src_raw = src_chunk->raw_values();
+    const auto* dst_raw = dst_chunk->raw_values();
+
+    for(int64_t row = 0; row < src_chunk->length(); ++row) {
+        auto src_id = src_prop_index_map.find(src_raw[row]);
+        auto dst_id = dst_prop_index_map.find(dst_raw[row]);
+
+        if(src_id == src_prop_index_map.end() || dst_id == dst_prop_index_map.end()) {
+            logger("[WARNING] edge "+std::to_string(src_raw[row])+"->"+std::to_string(dst_raw[row])+" not found in original graph.");
+            continue;
+        }
+
+        edge_translation[row] = EdgeSmall{src_id->second, dst_id->second, row};
     }
 }
 
@@ -322,7 +361,7 @@ std::string DoMerge(const py::dict& config_dict)
             }
             
             std::string path_to_graphar_pg = merge_config.graphar_config.path + '/' + 
-                                                vertex->GetPrefix() + '/' + path_to_pg;
+                                                vertex->GetPrefix() + path_to_pg;
             logger("  Looking for property '"+ vertex_prop + "' in " + path_to_graphar_pg);
             
             // read tables from directory and save property_value -> vertex_id relation
@@ -350,7 +389,102 @@ std::string DoMerge(const py::dict& config_dict)
         }
     }
 
-    // 2.2 
+    // 2.2 Work with one edge at a time
+    for (const auto& edge : merge_config.merge_schema.edges) {
+        logger("  Processing edge <"+edge.edge_type+">.");
+
+        // Work with one new PG at a time
+        for(const auto& pg : edge.property_groups) {
+
+            // 2.2.1 Define which source has this PG data
+            Source source_PG;
+            for (const auto& source : edge.sources) {
+
+                // collect properties that are defined in this source 
+                std::vector<std::string> prop_names_in_source(source.columns.size());
+                for (const auto& [data_column_name, prop_name] : source.columns) {
+                    prop_names_in_source.push_back(prop_name);
+                }
+
+                // make sure all properties are in this source
+                bool all_props_in_source = true;
+                for(const auto& prop : pg.properties) {
+                    auto it = std::find(prop_names_in_source.begin(), 
+                                        prop_names_in_source.end(), 
+                                        prop.name);
+                    if (it == prop_names_in_source.end()) {
+                        all_props_in_source = false;
+                        break;
+                    }
+                }
+
+                if(all_props_in_source) {
+                    source_PG = source;
+                    break;
+                }
+            }
+
+            // 2.2.2 Read source table with new PG
+            std::vector<std::string> pg_column_names;
+                for (const auto& [key, value] : source_PG.columns) {
+                pg_column_names.emplace_back(key);
+            }
+
+            std::shared_ptr<arrow::Table> pg_data_table;
+            {
+                std::vector<std::shared_ptr<arrow::Table>> file_tables(source_PG.path.size());
+                for (int i = 0; i < source_PG.path.size(); ++i) {
+                    file_tables[i] = GetDataFromFile(source_PG.path[i], pg_column_names,
+                                                    source_PG.delimiter, source_PG.file_type);
+                }
+                pg_data_table = ConcatenateTables(file_tables).ValueOrDie();
+                logger("    PG source read: "+std::to_string(source_PG.path.size()) +" tables concatenated.");
+            }
+
+            // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
+            //       Create vector to store this data
+            std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());
+            
+            //       Get columns with src&dst
+            const std::shared_ptr<arrow::ChunkedArray>& src_column = pg_data_table->GetColumnByName(edge.src_edge_prop);
+            const std::shared_ptr<arrow::ChunkedArray>& dst_column = pg_data_table->GetColumnByName(edge.dst_edge_prop);
+            arrow::Type::type src_prop_type = src_column->chunk(0)->type_id();
+            arrow::Type::type dst_prop_type = dst_column->chunk(0)->type_id();
+
+            //       For each edge, save info about it in edges_translation[row_in_data_postition]
+            if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)
+                MakeEdgeData<arrow::Int64Array, arrow::Int64Array>(
+                    src_column, dst_column, edges_translation,
+                    vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
+                );
+            else if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT32)
+                MakeEdgeData<arrow::Int64Array, arrow::Int32Array>(
+                    src_column, dst_column, edges_translation,
+                    vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
+                );
+            else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT64)
+                MakeEdgeData<arrow::Int32Array, arrow::Int64Array>(
+                    src_column, dst_column, edges_translation,
+                    vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
+                );
+            else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT32)
+                MakeEdgeData<arrow::Int32Array, arrow::Int32Array>(
+                    src_column, dst_column, edges_translation,
+                    vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
+                );
+            else
+                throw std::runtime_error("Merge: Unsupported type combination");
+            logger("    Edge src&dst ids calculated.");
+
+            // 2.2.4 Work with each adj_lists type required by user
+
+        }
+    }
+
 
     return "Merged successfully!";
 }
