@@ -7,6 +7,7 @@
 #include <pybind11/pybind11.h>
 #include "pybind11/stl.h"
 #include "util.h"
+#include "graphar/high-level/edges_builder.h"
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
@@ -18,6 +19,14 @@ struct EdgeSmall {
     int64_t src = -1;
     int64_t dst = -1;
     int64_t row = -1;
+
+    bool operator<(const EdgeSmall& other) const {
+        return src == other.src ? dst < other.dst : src < other.src;
+    }
+
+    bool operator==(const EdgeSmall& other) const {
+        return src == other.src && dst == other.dst;
+    }
 };
 
 int extract_tailing_number(const std::filesystem::path& filename) {
@@ -540,11 +549,72 @@ std::string DoMerge(const py::dict& config_dict)
                 // 1) Sort them the same way as in the original adj_lists (read only one edge chunk for that).
                 // 2) Create table by extracting values on the saved rows in correct order.
                 // 3) Save table to a specific directory.
-            }
 
+                // 2.2.5 Sort edges the same way they are sorted in chunks
+                std::string path_to_adjlist = merge_config.graphar_config.path + '/' 
+                                              + edge.prefix + adj_lst->GetPrefix()+"adj_list";
+                logger("    Looking for original data in "+path_to_adjlist);
+
+                std::vector<std::string> column_names = {graphar::GeneralParams::kSrcIndexCol, graphar::GeneralParams::kDstIndexCol};
+                for (const auto& edge_chunk_path : std::filesystem::directory_iterator(path_to_adjlist)) {
+
+                    int edge_chunk_idx = extract_tailing_number(edge_chunk_path);
+
+                    // calculate number of edges
+                    int64_t num_of_edges_in_chunk = 0;
+                    for(int thread = 0; thread < edge_to_chunk_mapping.size(); ++thread) {
+                        num_of_edges_in_chunk += edge_to_chunk_mapping[thread][edge_chunk_idx].size();
+                    }
+
+                    // collect edges from edges_translation by edge_chunk_idx, sort them
+                    std::vector<EdgeSmall> new_chunk_edges(num_of_edges_in_chunk);
+                    for(int thread = 0; thread < edge_to_chunk_mapping.size(); ++thread) {
+                        for(int64_t edge_idx : edge_to_chunk_mapping[thread][edge_chunk_idx]) {
+                            new_chunk_edges.emplace_back(edges_translation[edge_idx]);
+                        }
+                    }
+                    std::sort(new_chunk_edges.begin(), new_chunk_edges.end(),
+                              [](const EdgeSmall& a, const EdgeSmall& b){return a.src == b.src ? a.dst < b.dst : a.src < b.src;});
+
+                    // read one edge chunk and make builder for it
+                    logger("      Building part"+std::to_string(edge_chunk_idx));
+                    for (const auto& chunk : std::filesystem::directory_iterator(edge_chunk_path.path())) {
+                        arrow::Int64Builder builder;
+                        std::shared_ptr<arrow::Int64Array> src_column, dst_column;
+                        {
+                            std::shared_ptr<arrow::Table> tmp_table = GetDataFromParquetFile(chunk.path().string(), column_names)
+                                                                      ->CombineChunks().ValueOrDie();
+                            src_column = std::static_pointer_cast<arrow::Int64Array>(tmp_table->GetColumnByName(column_names[0])->chunk(0));
+                            dst_column = std::static_pointer_cast<arrow::Int64Array>(tmp_table->GetColumnByName(column_names[1])->chunk(0));
+                        }
+
+                        // for each edge find reference to its additional properties
+                        for(int64_t i = 0; i < src_column->length(); ++i) {
+                            int64_t src = src_column->Value(i);
+                            int64_t dst = dst_column->Value(i);
+
+                            // search for this edge
+                            auto it = std::lower_bound(new_chunk_edges.begin(), new_chunk_edges.end(), EdgeSmall{src, dst, -1});
+                            if (it != new_chunk_edges.end() && it->src == src && it->dst == dst) {
+                                //std::cout << "Found value = " << src << "->" << dst << " (on line: " << it->row << ")\n";
+                                builder.Append(it->row);
+                            } else {
+                                builder.AppendNull();
+                            }
+                        }
+
+                        // save order of data for this edge chunk
+                        std::shared_ptr<arrow::Array> indices_order;
+                        builder.Finish(&indices_order);
+
+                        // exctract edges in correct order
+                        arrow::compute::TakeOptions options;
+                        auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
+                    }
+                } 
+            }
         }
     }
-
 
     return "Merged successfully!";
 }
