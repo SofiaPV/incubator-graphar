@@ -8,6 +8,8 @@
 #include "pybind11/stl.h"
 #include "util.h"
 #include "graphar/high-level/edges_builder.h"
+#include "graphar/arrow/chunk_writer.h"
+#include "graphar/graph_info.h"
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
@@ -408,8 +410,45 @@ std::string DoMerge(const py::dict& config_dict)
     for (const auto& edge : merge_config.merge_schema.edges) {
         logger("  Processing edge <"+edge.edge_type+">.");
 
+        // 2.2.0 Create edge_info & edge_writer for this edge
+        auto edge_info = graph_info->GetEdgeInfo(edge.src_type, edge.edge_type, edge.dst_type);
+
+        // collect all pgs that will be added to this edge
+        auto pgs = std::vector<std::shared_ptr<graphar::PropertyGroup>>(edge_info->GetPropertyGroups());
+        int number_of_pgroups = pgs.size();
+
+        for (const auto& pg : edge.property_groups) {
+            ++number_of_pgroups;
+            std::vector<graphar::Property> props;
+            for (const auto& prop : pg.properties) {
+                graphar::Property property(
+                    prop.name, graphar::DataType::TypeNameToDataType(prop.data_type),
+                    prop.is_primary, prop.nullable);
+                props.push_back(property);
+            }
+            auto property_group = graphar::CreatePropertyGroup(
+                props, graphar::StringToFileType(pg.file_type), 
+                edge.edge_type+"_properties_"+std::to_string(number_of_pgroups));
+            pgs.emplace_back(property_group);
+        }
+
+        // collect adj lists info
+        graphar::AdjacentListVector original_adj_lists;
+        for (const auto& adj_list : edge.adj_lists) {
+            original_adj_lists.push_back(graphar::CreateAdjacentList(
+                                            graphar::OrderedAlignedToAdjListType(adj_list.ordered,
+                                                                                adj_list.aligned_by),
+                                            graphar::StringToFileType(adj_list.file_type)));
+        }
+
+        // update edge info
+        auto updated_edge_info = graphar::CreateEdgeInfo(
+            edge.src_type, edge.edge_type, edge.dst_type, edge.chunk_size,
+            vertex_chunk_sizes[edge.src_type], vertex_chunk_sizes[edge.dst_type],
+            true, original_adj_lists, pgs, edge.prefix, version);
+
         // Work with one new PG at a time
-        for(const auto& pg : edge.property_groups) {
+        for(auto& pg : edge.property_groups) {
 
             // 2.2.1 Define which source has this PG data
             Source source_PG;
@@ -504,6 +543,10 @@ std::string DoMerge(const py::dict& config_dict)
                                                                         adj_list.aligned_by),
                                     graphar::StringToFileType(adj_list.file_type)
                 );
+
+                // create writer for this edge & adj list type
+                graphar::EdgeChunkWriter edge_writer(updated_edge_info, save_path.string()+"/", adj_lst->GetType(), 
+                                                     StringToValidateLevel(edge.validate_level));
                 
                 // calculate number of chunks according to the number of src/dst vertices
                 int num_of_chunks = 0;
@@ -558,7 +601,7 @@ std::string DoMerge(const py::dict& config_dict)
                 std::vector<std::string> column_names = {graphar::GeneralParams::kSrcIndexCol, graphar::GeneralParams::kDstIndexCol};
                 for (const auto& edge_chunk_path : std::filesystem::directory_iterator(path_to_adjlist)) {
 
-                    int edge_chunk_idx = extract_tailing_number(edge_chunk_path);
+                    int64_t edge_chunk_idx = extract_tailing_number(edge_chunk_path);
 
                     // calculate number of edges
                     int64_t num_of_edges_in_chunk = 0;
@@ -572,6 +615,10 @@ std::string DoMerge(const py::dict& config_dict)
                         for(int64_t edge_idx : edge_to_chunk_mapping[thread][edge_chunk_idx]) {
                             new_chunk_edges.emplace_back(edges_translation[edge_idx]);
                         }
+
+                        // clear additional data
+                        edge_to_chunk_mapping[thread][edge_chunk_idx].clear();
+                        std::vector<int64_t>().swap(edge_to_chunk_mapping[thread][edge_chunk_idx]);
                     }
                     std::sort(new_chunk_edges.begin(), new_chunk_edges.end(),
                               [](const EdgeSmall& a, const EdgeSmall& b){return a.src == b.src ? a.dst < b.dst : a.src < b.src;});
@@ -609,7 +656,14 @@ std::string DoMerge(const py::dict& config_dict)
 
                         // exctract edges in correct order
                         arrow::compute::TakeOptions options;
+                        // TODO: not take src&dst data (critical)
                         auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
+                        logger("Ready to write down: "+std::to_string(sorted_chunk->num_rows()));
+
+                        // write them down
+                        edge_writer.WritePropertyChunk(sorted_chunk, updated_edge_info->GetPropertyGroup(pg.properties[0].name), 
+                                                       edge_chunk_idx, extract_tailing_number(chunk), 
+                                                       StringToValidateLevel(edge.validate_level)); // TODO: check
                     }
                 } 
             }
