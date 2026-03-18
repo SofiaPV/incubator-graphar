@@ -118,6 +118,7 @@ void MakeEdgeData(const std::shared_ptr<arrow::ChunkedArray> src_column,
     auto src_chunk = std::static_pointer_cast<SrcColumnType>(src_column->chunk(0));
     auto dst_chunk = std::static_pointer_cast<DstColumnType>(dst_column->chunk(0));
 
+    // TODO: check src & dst not null
     // both src & dst are not nullable, use raw_values
     const auto* src_raw = src_chunk->raw_values();
     const auto* dst_raw = dst_chunk->raw_values();
@@ -473,7 +474,7 @@ std::string DoMerge(const py::dict& config_dict)
                 }
 
                 if(all_props_in_source) {
-                    source_PG = source;
+                    source_PG = source;  // TODO: hadle not found error
                     break;
                 }
             }
@@ -658,15 +659,24 @@ std::string DoMerge(const py::dict& config_dict)
                         arrow::compute::TakeOptions options;
                         // TODO: not take src&dst data (critical)
                         auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
-                        logger("Ready to write down: "+std::to_string(sorted_chunk->num_rows()));
 
                         // write them down
-                        edge_writer.WritePropertyChunk(sorted_chunk, updated_edge_info->GetPropertyGroup(pg.properties[0].name), 
-                                                       edge_chunk_idx, extract_tailing_number(chunk), 
-                                                       StringToValidateLevel(edge.validate_level)); // TODO: check
+                        auto status = edge_writer.WritePropertyChunk(sorted_chunk, updated_edge_info->GetPropertyGroup(pg.properties[0].name), 
+                                                                        edge_chunk_idx, extract_tailing_number(chunk), 
+                                                                        StringToValidateLevel(edge.validate_level)); // TODO: check
+                        if(!status.ok()) {
+                            logger("[ERROR] Could not write chunk.");
+                        } 
                     }
                 } 
             }
+        }
+
+        // write new edge description
+        auto file_name = edge.src_type + "_" + edge.edge_type + "_" + edge.dst_type + ".edge.yaml";
+        auto status = updated_edge_info->Save(save_path / file_name);
+        if(!status.ok()) {
+            logger("[ERROR] Could not write edge description file.");
         }
     }
 
