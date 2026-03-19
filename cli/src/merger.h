@@ -14,6 +14,7 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
+#include <optional>
 
 namespace py = pybind11;
 
@@ -54,7 +55,7 @@ void MapPK2row(const std::shared_ptr<arrow::ChunkedArray>& column,
     for (int64_t chunk_idx = 0; chunk_idx < column->num_chunks(); ++chunk_idx) {
         auto chunk = column->chunk(chunk_idx);
         auto arr = std::static_pointer_cast<ArrowArrayType>(chunk); 
-        const auto* data = arr->raw_values();  // TODO: use Value()
+        const auto* data = arr->raw_values();
 
         for (int64_t i = 0; i < arr->length(); ++i) {
             map[static_cast<int64_t>(data[i])] = row_offset + i;
@@ -64,7 +65,6 @@ void MapPK2row(const std::shared_ptr<arrow::ChunkedArray>& column,
 }
 
 
-// TODO: remake, take table, key-value columns, map
 /* 
 * Function suggests that CombineChunks() was already performed for the input table.
 */
@@ -118,7 +118,6 @@ void MakeEdgeData(const std::shared_ptr<arrow::ChunkedArray> src_column,
     auto src_chunk = std::static_pointer_cast<SrcColumnType>(src_column->chunk(0));
     auto dst_chunk = std::static_pointer_cast<DstColumnType>(dst_column->chunk(0));
 
-    // TODO: check src & dst not null
     // both src & dst are not nullable, use raw_values
     const auto* src_raw = src_chunk->raw_values();
     const auto* dst_raw = dst_chunk->raw_values();
@@ -184,7 +183,7 @@ std::string DoMerge(const py::dict& config_dict)
     // 2. Modify & rewrite this vertex info
     // 3. Collect PK+index to unordered map
     // 4. For each element in new table, get internal graphAr index-> Add data to this posotion
-    // 5. Dump
+    // 5. Save
 
     // 1. Add attributes to vertices
     logger("Processing vertices");
@@ -194,7 +193,7 @@ std::string DoMerge(const py::dict& config_dict)
         logger("  Processing vertex <"+vertex.type+">.");
         auto vertex_info = graph_info->GetVertexInfo(vertex.type);
 
-        // 1.2 Read info about property groups that will be added and add to the current information
+        // 1.2 Read info about property groups that will be added and add it to the current information
         // TODO: note: this looks a lot like importer.h, we probably need refactoring 
         logger("    Reading PG that should be added.");
         std::string primary_key;
@@ -287,10 +286,12 @@ std::string DoMerge(const py::dict& config_dict)
 
         // 1.3.4 Save map[user_pk] = row-number-in-input-table
         // note: only int64/int32 keys are allowed
-        // TODO: check key is int in config
         logger("    Mapping PK from new data to its row in new data.");
         std::unordered_map<int64_t, graphar::IdType> pk2row_num;
         auto pk_column = merged_vertex_table->GetColumnByName(vertex.join_on);
+        if (pk_column->null_count() > 0) {
+            throw std::runtime_error("Vertex PK property column '" + vertex.join_on + "' has NULL values.");
+        }
         switch (pk_column->chunk(0)->type_id()) {
             case arrow::Type::INT32:
                 MapPK2row<arrow::Int32Array>(pk_column, pk2row_num);
@@ -371,19 +372,23 @@ std::string DoMerge(const py::dict& config_dict)
                 continue;
             
             // find PG that contains this property
-            std::string path_to_pg;
+            std::optional<std::string> path_to_pg;
             for(auto& pg : vertex->GetPropertyGroups()) {
                 if (pg->HasProperty(vertex_prop)) {
                     path_to_pg = pg->GetPrefix();
                 }
+            } 
+            if(!path_to_pg.has_value()) {
+                throw std::runtime_error("No vertex property "+vertex_prop+" found in graph.");
             }
             
             std::string path_to_graphar_pg = merge_config.graphar_config.path + '/' + 
-                                                vertex->GetPrefix() + path_to_pg;
+                                                vertex->GetPrefix() + path_to_pg.value();
             logger("  Looking for property '"+ vertex_prop + "' in " + path_to_graphar_pg);
             
             // read tables from directory and save property_value -> vertex_id relation
-            std::unordered_map<int64_t, graphar::IdType> property_to_id_map;  // TODO: reserve
+            std::unordered_map<int64_t, graphar::IdType> property_to_id_map(vertex->GetChunkSize());
+            
             std::vector<std::string> column_names = {vertex_prop, graphar::GeneralParams::kVertexIndexCol};
             for (const auto& file : std::filesystem::directory_iterator(path_to_graphar_pg)) {
                 std::shared_ptr<arrow::Table> vertex_chunk_prop_columns = 
@@ -449,10 +454,11 @@ std::string DoMerge(const py::dict& config_dict)
             true, original_adj_lists, pgs, edge.prefix, version);
 
         // Work with one new PG at a time
+        // TODO: additional properties already exist -> overwrite them, add overwrite flg in config ???
         for(auto& pg : edge.property_groups) {
 
             // 2.2.1 Define which source has this PG data
-            Source source_PG;
+            std::optional<Source> source_PG;
             for (const auto& source : edge.sources) {
 
                 // collect properties that are defined in this source 
@@ -474,27 +480,31 @@ std::string DoMerge(const py::dict& config_dict)
                 }
 
                 if(all_props_in_source) {
-                    source_PG = source;  // TODO: hadle not found error
+                    source_PG = source;
                     break;
                 }
+            }
+            if(!source_PG.has_value()) {
+                throw std::runtime_error("There is no source that contains all properties from this PG.");
             }
 
             // 2.2.2 Read source table with new PG
             std::vector<std::string> pg_column_names;
-                for (const auto& [key, value] : source_PG.columns) {
+                for (const auto& [key, value] : source_PG.value().columns) {
                 pg_column_names.emplace_back(key);
             }
 
             std::shared_ptr<arrow::Table> pg_data_table;
             {
-                std::vector<std::shared_ptr<arrow::Table>> file_tables(source_PG.path.size());
-                for (int i = 0; i < source_PG.path.size(); ++i) {
-                    file_tables[i] = GetDataFromFile(source_PG.path[i], pg_column_names,
-                                                    source_PG.delimiter, source_PG.file_type);
+                std::vector<std::shared_ptr<arrow::Table>> file_tables(source_PG.value().path.size());
+                for (int i = 0; i < source_PG.value().path.size(); ++i) {
+                    file_tables[i] = GetDataFromFile(source_PG.value().path[i], pg_column_names,
+                                                    source_PG.value().delimiter, source_PG.value().file_type);
                 }
-                pg_data_table = ConcatenateTables(file_tables).ValueOrDie();
-                logger("    PG source read: "+std::to_string(source_PG.path.size()) +" tables concatenated.");
-            }
+                auto pg_data_table_tmp = ConcatenateTables(file_tables).ValueOrDie(); 
+                pg_data_table = pg_data_table_tmp->CombineChunks().ValueOrDie();
+                logger("    PG source read: "+std::to_string(source_PG.value().path.size()) +" tables concatenated.");
+            }  // TODO: change name & data type block
 
             // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
             //       Create vector to store this data
@@ -505,6 +515,12 @@ std::string DoMerge(const py::dict& config_dict)
             const std::shared_ptr<arrow::ChunkedArray>& dst_column = pg_data_table->GetColumnByName(edge.dst_edge_prop);
             arrow::Type::type src_prop_type = src_column->chunk(0)->type_id();
             arrow::Type::type dst_prop_type = dst_column->chunk(0)->type_id();
+            if (src_column->null_count() > 0) {
+                throw std::runtime_error("Edge src PK property column '" + edge.src_edge_prop + "' has NULL values.");
+            }
+            if (dst_column->null_count() > 0) {
+                throw std::runtime_error("Edge src PK property column '" + edge.dst_edge_prop + "' has NULL values.");
+            }
 
             //       For each edge, save info about it in edges_translation[row_in_data_postition]
             if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)
@@ -644,7 +660,6 @@ std::string DoMerge(const py::dict& config_dict)
                             // search for this edge
                             auto it = std::lower_bound(new_chunk_edges.begin(), new_chunk_edges.end(), EdgeSmall{src, dst, -1});
                             if (it != new_chunk_edges.end() && it->src == src && it->dst == dst) {
-                                //std::cout << "Found value = " << src << "->" << dst << " (on line: " << it->row << ")\n";
                                 builder.Append(it->row);
                             } else {
                                 builder.AppendNull();
@@ -657,15 +672,14 @@ std::string DoMerge(const py::dict& config_dict)
 
                         // exctract edges in correct order
                         arrow::compute::TakeOptions options;
-                        // TODO: not take src&dst data (critical)
                         auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
 
                         // write them down
                         auto status = edge_writer.WritePropertyChunk(sorted_chunk, updated_edge_info->GetPropertyGroup(pg.properties[0].name), 
-                                                                        edge_chunk_idx, extract_tailing_number(chunk), 
-                                                                        StringToValidateLevel(edge.validate_level)); // TODO: check
+                                                                     edge_chunk_idx, extract_tailing_number(chunk), 
+                                                                     StringToValidateLevel(edge.validate_level));
                         if(!status.ok()) {
-                            logger("[ERROR] Could not write chunk.");
+                            logger("[ERROR] Could not write chunk: " + status.message());
                         } 
                     }
                 } 
@@ -676,7 +690,7 @@ std::string DoMerge(const py::dict& config_dict)
         auto file_name = edge.src_type + "_" + edge.edge_type + "_" + edge.dst_type + ".edge.yaml";
         auto status = updated_edge_info->Save(save_path / file_name);
         if(!status.ok()) {
-            logger("[ERROR] Could not write edge description file.");
+            logger("[ERROR] Could not write edge description file: " + status.message());
         }
     }
 
