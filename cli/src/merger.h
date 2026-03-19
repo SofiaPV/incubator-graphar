@@ -15,6 +15,7 @@
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
 #include <optional>
+#include <omp.h>
 
 namespace py = pybind11;
 
@@ -160,7 +161,7 @@ void CollectRowNumers(const std::shared_ptr<arrow::ChunkedArray>& column,
 std::string DoMerge(const py::dict& config_dict)
 {
     logger("Mege started");
-    int num_threads = 1;  // TODO: OMP
+    size_t num_threads = omp_get_max_threads() / 2;
 
     // getting config data
     MergeConfig merge_config;
@@ -242,7 +243,7 @@ std::string DoMerge(const py::dict& config_dict)
                                     StringToValidateLevel(vertex.validate_level))
                                     .value();
 
-        // 1.3 Read graph's vertices' columns with PK and graphar index
+        // 1.3 Read graph vertices' columns with PK and graphar index
         // 1.3.1 Read graph's original PG to find user's PK there
         std::vector<std::shared_ptr<graphar::PropertyGroup>> original_pgs = vertex_info->GetPropertyGroups();
         std::shared_ptr<graphar::PropertyGroup> pg_with_user_PK;
@@ -284,6 +285,8 @@ std::string DoMerge(const py::dict& config_dict)
         // Merge all tables with new data into a big one
         std::shared_ptr<arrow::Table> merged_vertex_table = MergeTables(vertex_tables);
 
+        // TODO: change name and datatype step
+
         // 1.3.4 Save map[user_pk] = row-number-in-input-table
         // note: only int64/int32 keys are allowed
         logger("    Mapping PK from new data to its row in new data.");
@@ -306,7 +309,15 @@ std::string DoMerge(const py::dict& config_dict)
         // 1.3.5 For each chunk in GraphAr collect rows in additional data that match it
         std::vector<std::string> column_names = {vertex.join_on};
 
-        for (const auto& file : std::filesystem::directory_iterator(path_original)) {
+        std::vector<std::filesystem::directory_entry> parts;
+        for (auto& p : std::filesystem::directory_iterator(path_original)) {
+            parts.push_back(p);
+        }
+
+        #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, parts.size()))
+        for (int64_t i = 0; i < parts.size(); ++i) {
+            auto& file = parts[i];
+
             // read one vertex chunk in GraphAr format
             std::shared_ptr<arrow::ChunkedArray> vertex_chunk_column = 
                             GetDataFromParquetFile(file.path().string(), column_names)->column(0);
@@ -582,14 +593,14 @@ std::string DoMerge(const py::dict& config_dict)
                                     vertex_chunk_size + 1;
                 }
 
-                // map edge row to its chunk
+                // map edge row to its chunk TODO reserve
                 std::vector<std::vector<std::vector<int64_t>>> edge_to_chunk_mapping(
                     num_threads,
                     std::vector<std::vector<int64_t>>(num_of_chunks)
                 );
 
-                // TODO: omp
                 logger("    Mapping edge row to its chunk.");
+                #pragma omp parallel for schedule(dynamic) num_threads(num_threads)
                 for(int64_t i = 0; i < edges_translation.size(); ++i) {
 
                     // define graphar vertex id 
@@ -601,13 +612,13 @@ std::string DoMerge(const py::dict& config_dict)
                     }
 
                     // add row number of edge in table into chunk
-                    edge_to_chunk_mapping[0][vertex_id/vertex_chunk_size].push_back(i);
+                    edge_to_chunk_mapping[omp_get_thread_num()][vertex_id/vertex_chunk_size].push_back(i);
                 }
                 logger("    Mapping complete.");
 
                 // Edges are sorted by their chunks, we only need to:
                 // 1) Sort them the same way as in the original adj_lists (read only one edge chunk for that).
-                // 2) Create table by extracting values on the saved rows in correct order.
+                // 2) Create table by extracting values from the saved rows in correct order.
                 // 3) Save table to a specific directory.
 
                 // 2.2.5 Sort edges the same way they are sorted in chunks
@@ -615,9 +626,16 @@ std::string DoMerge(const py::dict& config_dict)
                                               + edge.prefix + adj_lst->GetPrefix()+"adj_list";
                 logger("    Looking for original data in "+path_to_adjlist);
 
-                std::vector<std::string> column_names = {graphar::GeneralParams::kSrcIndexCol, graphar::GeneralParams::kDstIndexCol};
-                for (const auto& edge_chunk_path : std::filesystem::directory_iterator(path_to_adjlist)) {
+                std::vector<std::filesystem::directory_entry> parts;
+                for (auto& p : std::filesystem::directory_iterator(path_to_adjlist)) {
+                    parts.push_back(p);
+                }
 
+                std::vector<std::string> column_names = {graphar::GeneralParams::kSrcIndexCol, graphar::GeneralParams::kDstIndexCol};
+                #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, parts.size()))
+                for (int64_t i = 0; i < parts.size(); ++i) {
+
+                    auto& edge_chunk_path = parts[i];
                     int64_t edge_chunk_idx = extract_tailing_number(edge_chunk_path);
 
                     // calculate number of edges
@@ -654,7 +672,7 @@ std::string DoMerge(const py::dict& config_dict)
 
                         // for each edge find reference to its additional properties
                         for(int64_t i = 0; i < src_column->length(); ++i) {
-                            int64_t src = src_column->Value(i);
+                            int64_t src = src_column->Value(i);  // TODO: raw_values, bc its graphar data
                             int64_t dst = dst_column->Value(i);
 
                             // search for this edge
