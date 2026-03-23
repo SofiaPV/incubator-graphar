@@ -282,7 +282,7 @@ std::string DoMerge(const py::dict& config_dict)
                 table = ConcatenateTables(file_tables).ValueOrDie();
             }
 
-             // TODO: change name and datatype step
+             // Change name and datatype step
             std::unordered_map<std::string, Property> column_prop_map;
             std::unordered_map<std::string, std::string> reversed_columns_config;
             for (const auto& [key, value] : source.columns) {
@@ -547,13 +547,50 @@ std::string DoMerge(const py::dict& config_dict)
                                                     source_PG.value().delimiter, source_PG.value().file_type);
                 }
                 auto pg_data_table_tmp = ConcatenateTables(file_tables).ValueOrDie(); 
-                pg_data_table = pg_data_table_tmp->CombineChunks().ValueOrDie();
+                pg_data_table = pg_data_table_tmp->CombineChunks().ValueOrDie();  // TODO: combine chunks for column, not table
                 logger("    PG source read: "+std::to_string(source_PG.value().path.size()) +" tables concatenated.");
-            }  // TODO: change name & data type block
+            }  
+            
+            std::unordered_map<std::string, graphar::Property> column_prop_map;
+            std::unordered_map<std::string, std::string> reversed_columns;
+            for (const auto& [key, value] : source_PG.value().columns) {
+                reversed_columns[value] = key;
+            }
+
+            for (const auto& pg : edge.property_groups) {
+                for (const auto& prop : pg.properties) {
+                    column_prop_map[reversed_columns[prop.name]] = graphar::Property(
+                        prop.name,
+                        graphar::DataType::TypeNameToDataType(prop.data_type),
+                        prop.is_primary, prop.nullable);
+                }
+            }
+            std::unordered_map<
+                std::string,
+                std::pair<std::string, std::shared_ptr<arrow::DataType>>>
+                columns_to_change;
+
+            for (const auto& [column, prop] : column_prop_map) {
+                auto arrow_data_type =
+                    graphar::DataType::DataTypeToArrowDataType(prop.type);
+                auto arrow_column = pg_data_table->GetColumnByName(column);
+                if (!prop.is_nullable) {
+                    for (const auto& chunk : arrow_column->chunks()) {
+                        if (chunk->null_count() > 0) {
+                            throw std::runtime_error("Non-nullable column '" + column +
+                                                    "' has null values");
+                        }
+                    }
+                }
+                if (column != prop.name || arrow_column->type()->id() != arrow_data_type->id()) {
+                    columns_to_change[column] = std::make_pair(prop.name, arrow_data_type);
+                }
+            }
+            pg_data_table = ChangeNameAndDataType(pg_data_table, columns_to_change);
 
             // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
             //       Create vector to store this data
-            std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());  // TODO: combine chunks for column, not table
+            std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());
             
             //       Get columns with src&dst
             const std::shared_ptr<arrow::ChunkedArray>& src_column = pg_data_table->GetColumnByName(edge.src_edge_prop);
@@ -597,7 +634,7 @@ std::string DoMerge(const py::dict& config_dict)
             logger("    Edge src&dst ids calculated.");
 
             // 2.2.4 Work with each adj_lists type required by user
-            for (const auto& adj_list : edge.adj_lists) {  // TODO: user demands adj_list that does not exist
+            for (const auto& adj_list : edge.adj_lists) {  // TODO: user demands adj_list that does not exist in original graph
                 logger("    Working with adj_list aligned by "+adj_list.aligned_by);
 
                 auto adj_lst = graphar::CreateAdjacentList(
@@ -706,8 +743,8 @@ std::string DoMerge(const py::dict& config_dict)
 
                         // for each edge find reference to its additional properties
                         for(int64_t i = 0; i < src_column->length(); ++i) {
-                            int64_t src = src_column->Value(i);  // TODO: raw_values, bc its graphar data
-                            int64_t dst = dst_column->Value(i);
+                            int64_t src = src_column->Value(i);  // TODO: raw_values, bc its graphar data PK
+                            int64_t dst = dst_column->Value(i);  // TODO: check PK column not null CRITICAL
 
                             // search for this edge
                             auto it = std::lower_bound(new_chunk_edges.begin(), new_chunk_edges.end(), EdgeSmall{src, dst, -1});
@@ -723,6 +760,8 @@ std::string DoMerge(const py::dict& config_dict)
                         builder.Finish(&indices_order);
 
                         // exctract edges in correct order
+                        // we extract all data, but write only properties in edge order, this is why it works
+                        // we never replace PKs in new data with indices that we caclulated, bc we already have adj_lists 
                         arrow::compute::TakeOptions options;
                         auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
 
@@ -748,4 +787,3 @@ std::string DoMerge(const py::dict& config_dict)
 
     return "Merged successfully!";
 }
-
