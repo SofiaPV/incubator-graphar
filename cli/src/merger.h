@@ -272,20 +272,53 @@ std::string DoMerge(const py::dict& config_dict)
             }
 
             // Read source
+            std::shared_ptr<arrow::Table> table;
             {
                 std::vector<std::shared_ptr<arrow::Table>> file_tables(source.path.size());
                 for (int i = 0; i < source.path.size(); ++i) {
                     file_tables[i] = GetDataFromFile(source.path[i], new_column_names, source.delimiter,
                                         source.file_type);
                 }
-                std::shared_ptr<arrow::Table> table = ConcatenateTables(file_tables).ValueOrDie();
-                vertex_tables.push_back(table);
+                table = ConcatenateTables(file_tables).ValueOrDie();
             }
+
+             // TODO: change name and datatype step
+            std::unordered_map<std::string, Property> column_prop_map;
+            std::unordered_map<std::string, std::string> reversed_columns_config;
+            for (const auto& [key, value] : source.columns) {
+                reversed_columns_config[value] = key;
+            }
+            for (const auto& pg : vertex.property_groups) {
+                for (const auto& prop : pg.properties) {
+                    column_prop_map[reversed_columns_config[prop.name]] = prop;
+                }
+            }
+            std::unordered_map<
+                std::string, std::pair<std::string, std::shared_ptr<arrow::DataType>>>
+                columns_to_change;
+            for (const auto& [column, prop] : column_prop_map) {
+                auto arrow_data_type = graphar::DataType::DataTypeToArrowDataType(
+                    graphar::DataType::TypeNameToDataType(prop.data_type));
+                auto arrow_column = table->GetColumnByName(column);
+
+                if (!prop.nullable) {
+                    for (const auto& chunk : arrow_column->chunks()) {
+                        if (chunk->null_count() > 0) {
+                        throw std::runtime_error("Non-nullable column '" + column +
+                                                "' has null values");
+                        }
+                    }
+                }
+                if (column != prop.name || arrow_column->type()->id() != arrow_data_type->id()) {
+                    columns_to_change[column] = std::make_pair(prop.name, arrow_data_type);
+                }
+            }
+            table = ChangeNameAndDataType(table, columns_to_change);
+            vertex_tables.push_back(table);
         }
+                
         // Merge all tables with new data into a big one
         std::shared_ptr<arrow::Table> merged_vertex_table = MergeTables(vertex_tables);
-
-        // TODO: change name and datatype step
 
         // 1.3.4 Save map[user_pk] = row-number-in-input-table
         // note: only int64/int32 keys are allowed
@@ -295,6 +328,7 @@ std::string DoMerge(const py::dict& config_dict)
         if (pk_column->null_count() > 0) {
             throw std::runtime_error("Vertex PK property column '" + vertex.join_on + "' has NULL values.");
         }
+
         switch (pk_column->chunk(0)->type_id()) {
             case arrow::Type::INT32:
                 MapPK2row<arrow::Int32Array>(pk_column, pk2row_num);
@@ -519,7 +553,7 @@ std::string DoMerge(const py::dict& config_dict)
 
             // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
             //       Create vector to store this data
-            std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());
+            std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());  // TODO: combine chunks for column, not table
             
             //       Get columns with src&dst
             const std::shared_ptr<arrow::ChunkedArray>& src_column = pg_data_table->GetColumnByName(edge.src_edge_prop);
@@ -563,7 +597,7 @@ std::string DoMerge(const py::dict& config_dict)
             logger("    Edge src&dst ids calculated.");
 
             // 2.2.4 Work with each adj_lists type required by user
-            for (const auto& adj_list : edge.adj_lists) {
+            for (const auto& adj_list : edge.adj_lists) {  // TODO: user demands adj_list that does not exist
                 logger("    Working with adj_list aligned by "+adj_list.aligned_by);
 
                 auto adj_lst = graphar::CreateAdjacentList(
