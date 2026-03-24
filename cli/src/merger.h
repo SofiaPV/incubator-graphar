@@ -13,6 +13,7 @@
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
+#include <arrow/compute/api.h>
 #include <parquet/arrow/reader.h>
 #include <optional>
 #include <omp.h>
@@ -547,10 +548,11 @@ std::string DoMerge(const py::dict& config_dict)
                                                     source_PG.value().delimiter, source_PG.value().file_type);
                 }
                 auto pg_data_table_tmp = ConcatenateTables(file_tables).ValueOrDie(); 
-                pg_data_table = pg_data_table_tmp->CombineChunks().ValueOrDie();  // TODO: combine chunks for column, not table
+                pg_data_table = pg_data_table_tmp;
                 logger("    PG source read: "+std::to_string(source_PG.value().path.size()) +" tables concatenated.");
             }  
             
+            // Change name and data type step
             std::unordered_map<std::string, graphar::Property> column_prop_map;
             std::unordered_map<std::string, std::string> reversed_columns;
             for (const auto& [key, value] : source_PG.value().columns) {
@@ -593,8 +595,26 @@ std::string DoMerge(const py::dict& config_dict)
             std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());
             
             //       Get columns with src&dst
-            const std::shared_ptr<arrow::ChunkedArray>& src_column = pg_data_table->GetColumnByName(edge.src_edge_prop);
-            const std::shared_ptr<arrow::ChunkedArray>& dst_column = pg_data_table->GetColumnByName(edge.dst_edge_prop);
+            const std::shared_ptr<arrow::ChunkedArray>& src_column_tmp = pg_data_table->GetColumnByName(edge.src_edge_prop);
+            const std::shared_ptr<arrow::ChunkedArray>& dst_column_tmp = pg_data_table->GetColumnByName(edge.dst_edge_prop);
+
+            auto result = arrow::Concatenate(src_column_tmp->chunks());
+            if (!result.ok()) {
+                std::cerr << result.status().ToString() << std::endl;
+                throw std::runtime_error("Could not combine chunks for PK column.");
+            }
+            auto combined_src_array = result.ValueOrDie();
+
+            result = arrow::Concatenate(dst_column_tmp->chunks());
+            if (!result.ok()) {
+                std::cerr << result.status().ToString() << std::endl;
+                throw std::runtime_error("Could not combine chunks for PK column.");
+            }
+            auto combined_dst_array = result.ValueOrDie();
+
+            auto src_column = std::make_shared<arrow::ChunkedArray>(combined_src_array);
+            auto dst_column = std::make_shared<arrow::ChunkedArray>(combined_dst_array);
+
             arrow::Type::type src_prop_type = src_column->chunk(0)->type_id();
             arrow::Type::type dst_prop_type = dst_column->chunk(0)->type_id();
             if (src_column->null_count() > 0) {
