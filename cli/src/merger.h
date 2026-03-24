@@ -762,9 +762,12 @@ std::string DoMerge(const py::dict& config_dict)
                         }
 
                         // for each edge find reference to its additional properties
+                        auto src_column_raw = src_column->raw_values();
+                        auto dst_column_raw = dst_column->raw_values();
+
                         for(int64_t i = 0; i < src_column->length(); ++i) {
-                            int64_t src = src_column->Value(i);  // TODO: raw_values, bc its graphar data PK
-                            int64_t dst = dst_column->Value(i);  // TODO: check PK column not null CRITICAL
+                            int64_t src = src_column_raw[i];
+                            int64_t dst = dst_column_raw[i];
 
                             // search for this edge
                             auto it = std::lower_bound(new_chunk_edges.begin(), new_chunk_edges.end(), EdgeSmall{src, dst, -1});
