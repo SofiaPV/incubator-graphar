@@ -68,7 +68,7 @@ void MapPK2row(const std::shared_ptr<arrow::ChunkedArray>& column,
 
 
 /* 
-* Function suggests that CombineChunks() was already performed for the input table.
+* Function suggests that CombineChunks() was already performed for the input table.  TODO: no?
 */
 template <typename KeyColumnType, typename ValueColumnType>
 void MapValues(const std::string& key_column_name,
@@ -323,7 +323,7 @@ std::string DoMerge(const py::dict& config_dict)
 
         // 1.3.4 Save map[user_pk] = row-number-in-input-table
         // note: only int64/int32 keys are allowed
-        logger("    Mapping PK from new data to its row in new data.");
+        logger("    Mapping PK from new data to its row in new data."); // TODO: OMP (22-01-01 6 mins one thread)
         std::unordered_map<int64_t, graphar::IdType> pk2row_num;
         auto pk_column = merged_vertex_table->GetColumnByName(vertex.join_on);
         if (pk_column->null_count() > 0) {
@@ -358,7 +358,7 @@ std::string DoMerge(const py::dict& config_dict)
                             GetDataFromParquetFile(file.path().string(), column_names)->column(0);
             arrow::Int64Builder builder;
             int vertex_chunk_idx = extract_tailing_number(file);
-            logger("      Merging data to vertex chunk "+std::to_string(vertex_chunk_idx));
+            logger("      Merging data to vertex chunk "+std::to_string(vertex_chunk_idx));  // TODO: reduce logs (too many)
 
             // for each PK find the corresponding line number in additional attributes
             switch(vertex_chunk_column->chunk(0)->type_id()) {
@@ -387,7 +387,7 @@ std::string DoMerge(const py::dict& config_dict)
                                                 vertex_chunk_idx);
             }
         }
-        logger("  Processed vertex <"+vertex.type+">.");
+        logger("  Processed vertex <"+vertex.type+">.");  // TODO: pause for 1.5 minutes, why?
     }
 
     // 2. Add attributes to edges
@@ -436,8 +436,8 @@ std::string DoMerge(const py::dict& config_dict)
             std::unordered_map<int64_t, graphar::IdType> property_to_id_map(vertex->GetChunkSize());
             
             std::vector<std::string> column_names = {vertex_prop, graphar::GeneralParams::kVertexIndexCol};
-            for (const auto& file : std::filesystem::directory_iterator(path_to_graphar_pg)) {
-                std::shared_ptr<arrow::Table> vertex_chunk_prop_columns = 
+            for (const auto& file : std::filesystem::directory_iterator(path_to_graphar_pg)) {  // TODO: omp (8 minutes on 22-01-01)
+                std::shared_ptr<arrow::Table> vertex_chunk_prop_columns =                       // TODO: combine chunks ???
                                 GetDataFromParquetFile(file.path().string(), column_names);
                 switch(vertex_chunk_prop_columns->GetColumnByName(vertex_prop)->chunk(0)->type_id()) {
                     case arrow::Type::INT32:
@@ -452,7 +452,7 @@ std::string DoMerge(const py::dict& config_dict)
                         throw std::runtime_error("Unsupported type of PK in provided GraphAr data.");
                 }
             }
-            logger("  Property '" + vertex_prop + "' mapping to GraphAr id saved.");
+            logger("  Property '" + vertex_prop + "' mapping to GraphAr id saved.");   // TODO: pause for 6 mins after that, why?
             // save map for future usage
             vertex_prop_index_map[std::make_pair(vertex->GetType(), vertex_prop)] = property_to_id_map;
         }
@@ -543,7 +543,7 @@ std::string DoMerge(const py::dict& config_dict)
             std::shared_ptr<arrow::Table> pg_data_table;
             {
                 std::vector<std::shared_ptr<arrow::Table>> file_tables(source_PG.value().path.size());
-                for (int i = 0; i < source_PG.value().path.size(); ++i) {
+                for (int i = 0; i < source_PG.value().path.size(); ++i) {  // TODO: omp (43 minutes)
                     file_tables[i] = GetDataFromFile(source_PG.value().path[i], pg_column_names,
                                                     source_PG.value().delimiter, source_PG.value().file_type);
                 }
@@ -589,42 +589,51 @@ std::string DoMerge(const py::dict& config_dict)
                 }
             }
             pg_data_table = ChangeNameAndDataType(pg_data_table, columns_to_change);
+            logger("    Name & data type changed");
 
             // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
             //       Create vector to store this data
             std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());
+            logger("[DEBUG] Created edges_translation.");
             
             //       Get columns with src&dst
             const std::shared_ptr<arrow::ChunkedArray>& src_column_tmp = pg_data_table->GetColumnByName(edge.src_edge_prop);
             const std::shared_ptr<arrow::ChunkedArray>& dst_column_tmp = pg_data_table->GetColumnByName(edge.dst_edge_prop);
+            logger("[DEBUG] Got columns.");
 
             auto result = arrow::Concatenate(src_column_tmp->chunks());
             if (!result.ok()) {
                 std::cerr << result.status().ToString() << std::endl;
-                throw std::runtime_error("Could not combine chunks for PK column.");
+                logger("[DEBUG] Could not combine chunks for PK column 1.");
+                throw std::runtime_error("Could not combine chunks for PK column 1.");
             }
             auto combined_src_array = result.ValueOrDie();
 
             result = arrow::Concatenate(dst_column_tmp->chunks());
             if (!result.ok()) {
                 std::cerr << result.status().ToString() << std::endl;
-                throw std::runtime_error("Could not combine chunks for PK column.");
+                logger("[DEBUG] Could not combine chunks for PK column 2.");
+                throw std::runtime_error("Could not combine chunks for PK column 2.");
             }
             auto combined_dst_array = result.ValueOrDie();
 
             auto src_column = std::make_shared<arrow::ChunkedArray>(combined_src_array);
             auto dst_column = std::make_shared<arrow::ChunkedArray>(combined_dst_array);
+            logger("[DEBUG] Got ptrs to columns.");
 
             arrow::Type::type src_prop_type = src_column->chunk(0)->type_id();
             arrow::Type::type dst_prop_type = dst_column->chunk(0)->type_id();
             if (src_column->null_count() > 0) {
+                logger("[DEBUG] Null values 1.");
                 throw std::runtime_error("Edge src PK property column '" + edge.src_edge_prop + "' has NULL values.");
             }
             if (dst_column->null_count() > 0) {
+                logger("[DEBUG] Null values 1.");
                 throw std::runtime_error("Edge src PK property column '" + edge.dst_edge_prop + "' has NULL values.");
             }
 
             //       For each edge, save info about it in edges_translation[row_in_data_postition]
+            logger("[DEBUG] Before adding data to edges_translation.");
             if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)
                 MakeEdgeData<arrow::Int64Array, arrow::Int64Array>(
                     src_column, dst_column, edges_translation,
@@ -649,8 +658,10 @@ std::string DoMerge(const py::dict& config_dict)
                     vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
                     vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
                 );
-            else
+            else {
+                logger("[DEBUG] Merge: Unsupported type combination.");
                 throw std::runtime_error("Merge: Unsupported type combination");
+            }
             logger("    Edge src&dst ids calculated.");
 
             // 2.2.4 Work with each adj_lists type required by user
