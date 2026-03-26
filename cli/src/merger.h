@@ -422,6 +422,7 @@ std::string DoMerge(const py::dict& config_dict)
             for(auto& pg : vertex->GetPropertyGroups()) {
                 if (pg->HasProperty(vertex_prop)) {
                     path_to_pg = pg->GetPrefix();
+                    break;
                 }
             } 
             if(!path_to_pg.has_value()) {
