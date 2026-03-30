@@ -233,7 +233,7 @@ std::string DoMerge(const py::dict& config_dict)
 
         auto file_name = vertex.type + ".vertex.yaml";
         auto res = vertex_info_updated->Save(save_path / file_name);
-        vertices_info.push_back(vertex_info_updated);
+        //vertices_info.push_back(vertex_info_updated);
         logger("    Saved updated vertex description.");
 
         // Create vertex property writer to save new data
@@ -409,7 +409,7 @@ std::string DoMerge(const py::dict& config_dict)
     // 2.1.2 For each vertex type used in edges, find properties which
     //       edges refer to, read property & id columns and save property->id
     //       relation in the unordered_map.
-    for(auto vertex : vertices_info) {
+    for(auto vertex : graph_info->GetVertexInfos()) {
         if (vertex_props_in_edges.find(vertex->GetType()) == vertex_props_in_edges.end()) 
             continue;
         

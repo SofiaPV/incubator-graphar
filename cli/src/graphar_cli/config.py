@@ -260,8 +260,8 @@ class MergeEdge(Edge):
 
 
 class MergeSchema(BaseModel):
-    vertices: List[MergeVertex]
-    edges: List[MergeEdge]
+    vertices: List[MergeVertex] = list()
+    edges: List[MergeEdge] = list()
 
         
 class ImportSchema(BaseModel):
