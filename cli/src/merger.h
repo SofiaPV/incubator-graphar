@@ -595,28 +595,28 @@ std::string DoMerge(const py::dict& config_dict)
             // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
             //       Create vector to store this data
             std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());
-            logger("[DEBUG] Created edges_translation.");
             
             //       Get columns with src&dst
-            const std::shared_ptr<arrow::ChunkedArray>& src_column_tmp = pg_data_table->GetColumnByName(edge.src_edge_prop);
-            const std::shared_ptr<arrow::ChunkedArray>& dst_column_tmp = pg_data_table->GetColumnByName(edge.dst_edge_prop);
-            logger("[DEBUG] Got columns.");
+            std::shared_ptr<arrow::ChunkedArray> src_column_tmp = pg_data_table->GetColumnByName(edge.src_edge_prop);
+            std::shared_ptr<arrow::ChunkedArray> dst_column_tmp = pg_data_table->GetColumnByName(edge.dst_edge_prop);
 
             auto result = arrow::Concatenate(src_column_tmp->chunks());
             if (!result.ok()) {
                 std::cerr << result.status().ToString() << std::endl;
-                logger("[DEBUG] Could not combine chunks for PK column 1.");
                 throw std::runtime_error("Could not combine chunks for PK column 1.");
             }
             auto combined_src_array = result.ValueOrDie();
 
-            result = arrow::Concatenate(dst_column_tmp->chunks());
+            logger("[DEBUG] before concatenate 2.");
+            result = arrow::Concatenate(dst_column_tmp->chunks());  // ошибка тут
             if (!result.ok()) {
                 std::cerr << result.status().ToString() << std::endl;
                 logger("[DEBUG] Could not combine chunks for PK column 2.");
                 throw std::runtime_error("Could not combine chunks for PK column 2.");
             }
+            logger("[DEBUG] before extracting result.");
             auto combined_dst_array = result.ValueOrDie();
+            logger("[DEBUG] extracting result OK.");
 
             auto src_column = std::make_shared<arrow::ChunkedArray>(combined_src_array);
             auto dst_column = std::make_shared<arrow::ChunkedArray>(combined_dst_array);
