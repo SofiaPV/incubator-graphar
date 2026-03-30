@@ -17,6 +17,7 @@
 #include <parquet/arrow/reader.h>
 #include <optional>
 #include <omp.h>
+#include <endian.h>
 
 namespace py = pybind11;
 
@@ -349,6 +350,7 @@ std::string DoMerge(const py::dict& config_dict)
             parts.push_back(p);
         }
 
+        logger("      Merging data to vertex chunks.");
         #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, parts.size()))
         for (int64_t i = 0; i < parts.size(); ++i) {
             auto& file = parts[i];
@@ -358,7 +360,6 @@ std::string DoMerge(const py::dict& config_dict)
                             GetDataFromParquetFile(file.path().string(), column_names)->column(0);
             arrow::Int64Builder builder;
             int vertex_chunk_idx = extract_tailing_number(file);
-            logger("      Merging data to vertex chunk "+std::to_string(vertex_chunk_idx));  // TODO: reduce logs (too many)
 
             // for each PK find the corresponding line number in additional attributes
             switch(vertex_chunk_column->chunk(0)->type_id()) {
@@ -432,11 +433,20 @@ std::string DoMerge(const py::dict& config_dict)
             std::string path_to_graphar_pg = merge_config.graphar_config.path + '/' + 
                                                 vertex->GetPrefix() + path_to_pg.value();
             logger("  Looking for property '"+ vertex_prop + "' in " + path_to_graphar_pg);
-            
+
+            int64_t vertex_num = 0;
+            {
+                std::string path_to_vertex_count = merge_config.graphar_config.path + '/' + vertex->GetVerticesNumFilePath().value();
+                logger("  Path to vertex num: "+path_to_vertex_count);
+                std::ifstream file(path_to_vertex_count, std::ios::binary);
+                file.read(reinterpret_cast<char*>(&vertex_num), sizeof(vertex_num));
+                vertex_num = le64toh(vertex_num);  // TODO: important: make it correct for writer  
+            }
+
             // read tables from directory and save property_value -> vertex_id relation
-            std::unordered_map<int64_t, graphar::IdType> property_to_id_map(vertex->GetChunkSize());
-            
+            std::unordered_map<int64_t, graphar::IdType> property_to_id_map(vertex_num);
             std::vector<std::string> column_names = {vertex_prop, graphar::GeneralParams::kVertexIndexCol};
+            
             for (const auto& file : std::filesystem::directory_iterator(path_to_graphar_pg)) {  // TODO: omp (8 minutes on 22-01-01)
                 std::shared_ptr<arrow::Table> vertex_chunk_prop_columns =                       // TODO: combine chunks ???
                                 GetDataFromParquetFile(file.path().string(), column_names);
@@ -456,6 +466,7 @@ std::string DoMerge(const py::dict& config_dict)
             logger("  Property '" + vertex_prop + "' mapping to GraphAr id saved.");   // TODO: pause for 6 mins after that, why?
             // save map for future usage
             vertex_prop_index_map[std::make_pair(vertex->GetType(), vertex_prop)] = property_to_id_map;
+            logger("[DEBUG] vetrex_prop_index_map saved.");
         }
     }
 
@@ -590,7 +601,7 @@ std::string DoMerge(const py::dict& config_dict)
                 }
             }
             pg_data_table = ChangeNameAndDataType(pg_data_table, columns_to_change);
-            logger("    Name & data type changed");
+            logger("    Name & data type changed, columns to change: "+std::to_string(columns_to_change.size()));
 
             // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
             //       Create vector to store this data
