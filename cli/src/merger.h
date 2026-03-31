@@ -559,7 +559,9 @@ std::string DoMerge(const py::dict& config_dict)
                     file_tables[i] = GetDataFromFile(source_PG.value().path[i], pg_column_names,
                                                     source_PG.value().delimiter, source_PG.value().file_type);
                 }
+                logger("[DEBUG] before table concatenation.");
                 auto pg_data_table_tmp = ConcatenateTables(file_tables).ValueOrDie(); 
+                logger("[DEBUG] after table concatenation.");
                 pg_data_table = pg_data_table_tmp;
                 logger("    PG source read: "+std::to_string(source_PG.value().path.size()) +" tables concatenated.");
             }  
@@ -600,6 +602,7 @@ std::string DoMerge(const py::dict& config_dict)
                     columns_to_change[column] = std::make_pair(prop.name, arrow_data_type);
                 }
             }
+            logger("[DEBUG] Defore ChangeNameAndDataType().");
             pg_data_table = ChangeNameAndDataType(pg_data_table, columns_to_change);
             logger("    Name & data type changed, columns to change: "+std::to_string(columns_to_change.size()));
 
@@ -619,7 +622,32 @@ std::string DoMerge(const py::dict& config_dict)
             auto combined_src_array = result.ValueOrDie();
 
             logger("[DEBUG] before concatenate 2.");
-            result = arrow::Concatenate(dst_column_tmp->chunks());  // ошибка тут
+            if (!dst_column_tmp) {
+                throw std::runtime_error("Column 2 not found");
+            } else {
+                logger("[DEBUG] Dst column ptr not null.");
+            }
+            for (int i = 0; i < dst_column_tmp->num_chunks(); ++i) {
+                const auto& chunk = dst_column_tmp->chunk(i);
+
+                if (!chunk) {
+                    logger("Null chunk at "+std::to_string(i));
+                    continue;
+                }
+
+                if (!chunk->data()) {
+                    logger("No data buffer at "+std::to_string(i));
+                }
+
+                if (chunk->length() < 0) {
+                    logger("Negative length at "+std::to_string(i));
+                }
+            }
+            logger("[DEBUG] Get chunks()");
+            auto dst_chunks_tmp = dst_column_tmp->chunks();
+            logger("[DEBUG] Get chunks() OK.");
+            result = arrow::Concatenate(dst_chunks_tmp);  // ошибка тут
+            logger("[DEBUG] got result of Concatenate.");
             if (!result.ok()) {
                 std::cerr << result.status().ToString() << std::endl;
                 logger("[DEBUG] Could not combine chunks for PK column 2.");
