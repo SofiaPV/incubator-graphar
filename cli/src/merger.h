@@ -611,8 +611,14 @@ std::string DoMerge(const py::dict& config_dict)
             std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());
             
             //       Get columns with src&dst
-            std::shared_ptr<arrow::ChunkedArray> src_column_tmp = pg_data_table->GetColumnByName(edge.src_edge_prop);
-            std::shared_ptr<arrow::ChunkedArray> dst_column_tmp = pg_data_table->GetColumnByName(edge.dst_edge_prop);
+            std::shared_ptr<arrow::ChunkedArray> src_column_tmp = pg_data_table->GetColumnByName(reversed_columns[edge.src_edge_prop]);
+            std::shared_ptr<arrow::ChunkedArray> dst_column_tmp = pg_data_table->GetColumnByName(reversed_columns[edge.dst_edge_prop]);
+
+            for(auto column_to_remove: std::vector<std::string>{reversed_columns[edge.src_edge_prop], reversed_columns[edge.dst_edge_prop]}) {
+                logger("    Removing column " + column_to_remove);
+                int remove_idx = pg_data_table->schema()->GetFieldIndex(column_to_remove);
+                pg_data_table = pg_data_table->RemoveColumn(remove_idx).ValueOrDie();
+            }
 
             auto result = arrow::Concatenate(src_column_tmp->chunks());
             if (!result.ok()) {
@@ -627,26 +633,7 @@ std::string DoMerge(const py::dict& config_dict)
             } else {
                 logger("[DEBUG] Dst column ptr not null.");
             }
-            for (int i = 0; i < dst_column_tmp->num_chunks(); ++i) {
-                const auto& chunk = dst_column_tmp->chunk(i);
-
-                if (!chunk) {
-                    logger("Null chunk at "+std::to_string(i));
-                    continue;
-                }
-
-                if (!chunk->data()) {
-                    logger("No data buffer at "+std::to_string(i));
-                }
-
-                if (chunk->length() < 0) {
-                    logger("Negative length at "+std::to_string(i));
-                }
-            }
-            logger("[DEBUG] Get chunks()");
-            auto dst_chunks_tmp = dst_column_tmp->chunks();
-            logger("[DEBUG] Get chunks() OK.");
-            result = arrow::Concatenate(dst_chunks_tmp);  // ошибка тут
+            result = arrow::Concatenate(dst_column_tmp->chunks());  // ошибка тут
             logger("[DEBUG] got result of Concatenate.");
             if (!result.ok()) {
                 std::cerr << result.status().ToString() << std::endl;
