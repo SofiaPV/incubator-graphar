@@ -163,7 +163,7 @@ void CollectRowNumers(const std::shared_ptr<arrow::ChunkedArray>& column,
 std::string DoMerge(const py::dict& config_dict)
 {
     logger("Mege started");
-    size_t num_threads = omp_get_max_threads() / 2;
+    size_t num_threads = omp_get_max_threads();
 
     // getting config data
     MergeConfig merge_config;
@@ -466,7 +466,6 @@ std::string DoMerge(const py::dict& config_dict)
             logger("  Property '" + vertex_prop + "' mapping to GraphAr id saved.");   // TODO: pause for 6 mins after that, why?
             // save map for future usage
             vertex_prop_index_map[std::make_pair(vertex->GetType(), vertex_prop)] = property_to_id_map;
-            logger("[DEBUG] vetrex_prop_index_map saved.");
         }
     }
 
@@ -559,9 +558,7 @@ std::string DoMerge(const py::dict& config_dict)
                     file_tables[i] = GetDataFromFile(source_PG.value().path[i], pg_column_names,
                                                     source_PG.value().delimiter, source_PG.value().file_type);
                 }
-                logger("[DEBUG] before table concatenation.");
                 auto pg_data_table_tmp = ConcatenateTables(file_tables).ValueOrDie(); 
-                logger("[DEBUG] after table concatenation.");
                 pg_data_table = pg_data_table_tmp;
                 logger("    PG source read: "+std::to_string(source_PG.value().path.size()) +" tables concatenated.");
             }  
@@ -602,7 +599,7 @@ std::string DoMerge(const py::dict& config_dict)
                     columns_to_change[column] = std::make_pair(prop.name, arrow_data_type);
                 }
             }
-            logger("[DEBUG] Defore ChangeNameAndDataType().");
+            logger("[DEBUG] Before ChangeNameAndDataType().");
             pg_data_table = ChangeNameAndDataType(pg_data_table, columns_to_change);
             logger("    Name & data type changed, columns to change: "+std::to_string(columns_to_change.size()));
 
@@ -615,6 +612,7 @@ std::string DoMerge(const py::dict& config_dict)
             std::shared_ptr<arrow::ChunkedArray> dst_column_tmp = pg_data_table->GetColumnByName(reversed_columns[edge.dst_edge_prop]);
 
             for(auto column_to_remove: std::vector<std::string>{reversed_columns[edge.src_edge_prop], reversed_columns[edge.dst_edge_prop]}) {
+                
                 logger("    Removing column " + column_to_remove);
                 int remove_idx = pg_data_table->schema()->GetFieldIndex(column_to_remove);
                 pg_data_table = pg_data_table->RemoveColumn(remove_idx).ValueOrDie();
@@ -627,40 +625,26 @@ std::string DoMerge(const py::dict& config_dict)
             }
             auto combined_src_array = result.ValueOrDie();
 
-            logger("[DEBUG] before concatenate 2.");
-            if (!dst_column_tmp) {
-                throw std::runtime_error("Column 2 not found");
-            } else {
-                logger("[DEBUG] Dst column ptr not null.");
-            }
-            result = arrow::Concatenate(dst_column_tmp->chunks());  // ошибка тут
-            logger("[DEBUG] got result of Concatenate.");
+            result = arrow::Concatenate(dst_column_tmp->chunks());
             if (!result.ok()) {
                 std::cerr << result.status().ToString() << std::endl;
-                logger("[DEBUG] Could not combine chunks for PK column 2.");
                 throw std::runtime_error("Could not combine chunks for PK column 2.");
             }
-            logger("[DEBUG] before extracting result.");
             auto combined_dst_array = result.ValueOrDie();
-            logger("[DEBUG] extracting result OK.");
 
             auto src_column = std::make_shared<arrow::ChunkedArray>(combined_src_array);
             auto dst_column = std::make_shared<arrow::ChunkedArray>(combined_dst_array);
-            logger("[DEBUG] Got ptrs to columns.");
 
             arrow::Type::type src_prop_type = src_column->chunk(0)->type_id();
             arrow::Type::type dst_prop_type = dst_column->chunk(0)->type_id();
             if (src_column->null_count() > 0) {
-                logger("[DEBUG] Null values 1.");
                 throw std::runtime_error("Edge src PK property column '" + edge.src_edge_prop + "' has NULL values.");
             }
             if (dst_column->null_count() > 0) {
-                logger("[DEBUG] Null values 1.");
                 throw std::runtime_error("Edge src PK property column '" + edge.dst_edge_prop + "' has NULL values.");
             }
 
             //       For each edge, save info about it in edges_translation[row_in_data_postition]
-            logger("[DEBUG] Before adding data to edges_translation.");
             if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)
                 MakeEdgeData<arrow::Int64Array, arrow::Int64Array>(
                     src_column, dst_column, edges_translation,
@@ -686,7 +670,6 @@ std::string DoMerge(const py::dict& config_dict)
                     vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
                 );
             else {
-                logger("[DEBUG] Merge: Unsupported type combination.");
                 throw std::runtime_error("Merge: Unsupported type combination");
             }
             logger("    Edge src&dst ids calculated.");
@@ -761,6 +744,7 @@ std::string DoMerge(const py::dict& config_dict)
                 }
 
                 std::vector<std::string> column_names = {graphar::GeneralParams::kSrcIndexCol, graphar::GeneralParams::kDstIndexCol};
+                num_threads = omp_get_max_threads() / 4;
                 #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, parts.size()))
                 for (int64_t i = 0; i < parts.size(); ++i) {
 
@@ -788,7 +772,10 @@ std::string DoMerge(const py::dict& config_dict)
                               [](const EdgeSmall& a, const EdgeSmall& b){return a.src == b.src ? a.dst < b.dst : a.src < b.src;});
 
                     // read one edge chunk and make builder for it
-                    logger("      Building part"+std::to_string(edge_chunk_idx));
+                    #pragma omp critical
+                    {
+                        logger("      Building part"+std::to_string(edge_chunk_idx));
+                    }
                     for (const auto& chunk : std::filesystem::directory_iterator(edge_chunk_path.path())) {
                         arrow::Int64Builder builder;
                         std::shared_ptr<arrow::Int64Array> src_column, dst_column;
@@ -800,8 +787,8 @@ std::string DoMerge(const py::dict& config_dict)
                         }
 
                         // for each edge find reference to its additional properties
-                        auto src_column_raw = src_column->raw_values();
-                        auto dst_column_raw = dst_column->raw_values();
+                        const auto* src_column_raw = src_column->raw_values();
+                        const auto* dst_column_raw = dst_column->raw_values();
 
                         for(int64_t i = 0; i < src_column->length(); ++i) {
                             int64_t src = src_column_raw[i];
@@ -815,10 +802,17 @@ std::string DoMerge(const py::dict& config_dict)
                                 builder.AppendNull();
                             }
                         }
+                        src_column.reset();
+                        dst_column.reset();
 
                         // save order of data for this edge chunk
                         std::shared_ptr<arrow::Array> indices_order;
                         builder.Finish(&indices_order);
+
+                        #pragma omp critical
+                        {
+                            logger("[DEBUG]  Prepearing to do Take(), chunk: "+std::to_string(edge_chunk_idx));
+                        }
 
                         // exctract edges in correct order
                         // we extract all data, but write only properties in edge order, this is why it works
@@ -830,6 +824,11 @@ std::string DoMerge(const py::dict& config_dict)
                         auto status = edge_writer.WritePropertyChunk(sorted_chunk, updated_edge_info->GetPropertyGroup(pg.properties[0].name), 
                                                                      edge_chunk_idx, extract_tailing_number(chunk), 
                                                                      StringToValidateLevel(edge.validate_level));
+
+                        #pragma omp critical
+                        {
+                            logger("[DEBUG]  Wrote chunk: "+std::to_string(edge_chunk_idx));
+                        }
                         if(!status.ok()) {
                             logger("[ERROR] Could not write chunk: " + status.message());
                         } 
