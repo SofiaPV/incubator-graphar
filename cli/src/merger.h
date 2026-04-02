@@ -823,7 +823,7 @@ std::string DoMerge(const py::dict& config_dict)
                         // exctract edges in correct order
                         // we extract all data, but write only properties in edge order, this is why it works
                         // we never replace PKs in new data with indices that we caclulated, bc we already have adj_lists 
-                        arrow::compute::TakeOptions options;
+                        arrow::compute::TakeOptions options = arrow::compute::TakeOptions::NoBoundsCheck();
                         auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
                         #pragma omp critical
                         {
