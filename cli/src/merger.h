@@ -163,7 +163,7 @@ void CollectRowNumers(const std::shared_ptr<arrow::ChunkedArray>& column,
 std::string DoMerge(const py::dict& config_dict)
 {
     logger("Mege started");
-    size_t num_threads = omp_get_max_threads();
+    size_t num_threads = omp_get_max_threads() / 3 * 2;
 
     // getting config data
     MergeConfig merge_config;
@@ -744,12 +744,18 @@ std::string DoMerge(const py::dict& config_dict)
                 }
 
                 std::vector<std::string> column_names = {graphar::GeneralParams::kSrcIndexCol, graphar::GeneralParams::kDstIndexCol};
-                num_threads = omp_get_max_threads() / 4;
+                //num_threads = omp_get_max_threads() / 4;
+                num_threads = 1;
+                logger("    Building edges with " + std::to_string(num_threads) + " threads.");
                 #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, parts.size()))
                 for (int64_t i = 0; i < parts.size(); ++i) {
 
                     auto& edge_chunk_path = parts[i];
                     int64_t edge_chunk_idx = extract_tailing_number(edge_chunk_path);
+                    #pragma omp critical
+                    {
+                        logger("      Reading source of part"+std::to_string(edge_chunk_idx));
+                    }
 
                     // calculate number of edges
                     int64_t num_of_edges_in_chunk = 0;
@@ -819,6 +825,10 @@ std::string DoMerge(const py::dict& config_dict)
                         // we never replace PKs in new data with indices that we caclulated, bc we already have adj_lists 
                         arrow::compute::TakeOptions options;
                         auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
+                        #pragma omp critical
+                        {
+                            logger("[DEBUG]  Take performed: "+std::to_string(edge_chunk_idx));
+                        }
 
                         // write them down
                         auto status = edge_writer.WritePropertyChunk(sorted_chunk, updated_edge_info->GetPropertyGroup(pg.properties[0].name), 
