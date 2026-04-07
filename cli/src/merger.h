@@ -554,10 +554,13 @@ std::string DoMerge(const py::dict& config_dict)
             std::shared_ptr<arrow::Table> pg_data_table;
             {
                 std::vector<std::shared_ptr<arrow::Table>> file_tables(source_PG.value().path.size());
+
+                #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, source_PG.value().path.size()))
                 for (int i = 0; i < source_PG.value().path.size(); ++i) {  // TODO: omp (43 minutes)
                     file_tables[i] = GetDataFromFile(source_PG.value().path[i], pg_column_names,
                                                     source_PG.value().delimiter, source_PG.value().file_type);
                 }
+                logger("[DEBUG] before ConcatenateTables()");
                 auto pg_data_table_tmp = ConcatenateTables(file_tables).ValueOrDie(); 
                 pg_data_table = pg_data_table_tmp;
                 logger("    PG source read: "+std::to_string(source_PG.value().path.size()) +" tables concatenated.");
@@ -602,6 +605,8 @@ std::string DoMerge(const py::dict& config_dict)
             logger("[DEBUG] Before ChangeNameAndDataType().");
             pg_data_table = ChangeNameAndDataType(pg_data_table, columns_to_change);
             logger("    Name & data type changed, columns to change: "+std::to_string(columns_to_change.size()));
+            pg_data_table = pg_data_table->CombineChunks().ValueOrDie();
+            logger("[DEBUG] after CombineChunks()");
 
             // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
             //       Create vector to store this data
@@ -746,6 +751,7 @@ std::string DoMerge(const py::dict& config_dict)
                 std::vector<std::string> column_names = {graphar::GeneralParams::kSrcIndexCol, graphar::GeneralParams::kDstIndexCol};
                 //num_threads = omp_get_max_threads() / 4;
                 num_threads = 1;
+                int processed_chunks = 0;
                 logger("    Building edges with " + std::to_string(num_threads) + " threads.");
                 #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, parts.size()))
                 for (int64_t i = 0; i < parts.size(); ++i) {
@@ -815,20 +821,11 @@ std::string DoMerge(const py::dict& config_dict)
                         std::shared_ptr<arrow::Array> indices_order;
                         builder.Finish(&indices_order);
 
-                        #pragma omp critical
-                        {
-                            logger("[DEBUG]  Prepearing to do Take(), chunk: "+std::to_string(edge_chunk_idx));
-                        }
-
                         // exctract edges in correct order
                         // we extract all data, but write only properties in edge order, this is why it works
                         // we never replace PKs in new data with indices that we caclulated, bc we already have adj_lists 
                         arrow::compute::TakeOptions options = arrow::compute::TakeOptions::NoBoundsCheck();
                         auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
-                        #pragma omp critical
-                        {
-                            logger("[DEBUG]  Take performed: "+std::to_string(edge_chunk_idx));
-                        }
 
                         // write them down
                         auto status = edge_writer.WritePropertyChunk(sorted_chunk, updated_edge_info->GetPropertyGroup(pg.properties[0].name), 
@@ -838,6 +835,8 @@ std::string DoMerge(const py::dict& config_dict)
                         #pragma omp critical
                         {
                             logger("[DEBUG]  Wrote chunk: "+std::to_string(edge_chunk_idx));
+                            processed_chunks += 1;
+                            logger("      Processed "+std::to_string(processed_chunks)+" edge chunks.");
                         }
                         if(!status.ok()) {
                             logger("[ERROR] Could not write chunk: " + status.message());

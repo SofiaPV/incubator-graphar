@@ -91,18 +91,17 @@ std::shared_ptr<arrow::Table> GetDataFromParquetFile(
       arrow::io::ReadableFile::Open(path, arrow::default_memory_pool())
           .ValueOrDie();
 
-  // Create a Parquet FileReader
-  std::unique_ptr<parquet::arrow::FileReader> parquet_reader;
-  auto status = parquet::arrow::OpenFile(infile, arrow::default_memory_pool(),
-                                         &parquet_reader);
-  if (!status.ok()) {
-    throw std::runtime_error("Failed to create Parquet FileReader: " +
-                             status.ToString());
+  auto result = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
+  if (!result.ok()) {
+      throw std::runtime_error(
+          "Failed to create Parquet FileReader: " +
+          result.status().ToString());
   }
+  std::unique_ptr<parquet::arrow::FileReader> parquet_reader = std::move(result).ValueOrDie();
 
   // Retrieve the Arrow schema from the Parquet file
   std::shared_ptr<arrow::Schema> schema;
-  status = parquet_reader->GetSchema(&schema);
+  auto status = parquet_reader->GetSchema(&schema);
   if (!status.ok()) {
     throw std::runtime_error("Failed to retrieve schema from Parquet file: " +
                              status.ToString());
@@ -264,7 +263,7 @@ std::shared_ptr<arrow::Table> GetDataFromJsonFile(
   return table;
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> OpenParquetAsBatch(
+/*arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> OpenParquetAsBatch(
     const std::string& path, const std::vector<std::string>& column_names) {
 
   ARROW_ASSIGN_OR_RAISE(auto input, arrow::io::ReadableFile::Open(path));
@@ -315,7 +314,7 @@ std::shared_ptr<arrow::RecordBatchReader> GetDataAsBatch(
       // TODO: add csv, orc, json, any imprtant format
       throw std::runtime_error("Unsupported file type: " + file_type);
     }
-}
+}*/
 
 std::shared_ptr<arrow::Table> GetDataFromFile(
     const std::string& path, const std::vector<std::string>& column_names,
