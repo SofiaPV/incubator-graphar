@@ -68,9 +68,6 @@ void MapPK2row(const std::shared_ptr<arrow::ChunkedArray>& column,
 }
 
 
-/* 
-* Function suggests that CombineChunks() was already performed for the input table.  TODO: no?
-*/
 template <typename KeyColumnType, typename ValueColumnType>
 void MapValues(const std::string& key_column_name,
                const std::string& value_column_name,
@@ -324,7 +321,7 @@ std::string DoMerge(const py::dict& config_dict)
 
         // 1.3.4 Save map[user_pk] = row-number-in-input-table
         // note: only int64/int32 keys are allowed
-        logger("    Mapping PK from new data to its row in new data."); // TODO: OMP (22-01-01 6 mins one thread)
+        logger("    Mapping PK from new data to its row in new data."); // TODO: OMP (22-01-01 6 mins one thread) ??? 
         std::unordered_map<int64_t, graphar::IdType> pk2row_num;
         auto pk_column = merged_vertex_table->GetColumnByName(vertex.join_on);
         if (pk_column->null_count() > 0) {
@@ -556,7 +553,7 @@ std::string DoMerge(const py::dict& config_dict)
                 std::vector<std::shared_ptr<arrow::Table>> file_tables(source_PG.value().path.size());
 
                 #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, source_PG.value().path.size()))
-                for (int i = 0; i < source_PG.value().path.size(); ++i) {  // TODO: omp (43 minutes)
+                for (int i = 0; i < source_PG.value().path.size(); ++i) {
                     file_tables[i] = GetDataFromFile(source_PG.value().path[i], pg_column_names,
                                                     source_PG.value().delimiter, source_PG.value().file_type);
                 }
