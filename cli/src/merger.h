@@ -113,7 +113,8 @@ void MakeEdgeData(const std::shared_ptr<arrow::ChunkedArray> src_column,
                   const std::shared_ptr<arrow::ChunkedArray> dst_column,
                   std::vector<EdgeSmall>& edge_translation,
                   const std::unordered_map<int64_t, graphar::IdType>& src_prop_index_map,
-                  const std::unordered_map<int64_t, graphar::IdType>& dst_prop_index_map) {
+                  const std::unordered_map<int64_t, graphar::IdType>& dst_prop_index_map,
+                  const int num_threads = 1) {
 
     auto src_chunk = std::static_pointer_cast<SrcColumnType>(src_column->chunk(0));
     auto dst_chunk = std::static_pointer_cast<DstColumnType>(dst_column->chunk(0));
@@ -122,6 +123,7 @@ void MakeEdgeData(const std::shared_ptr<arrow::ChunkedArray> src_column,
     const auto* src_raw = src_chunk->raw_values();
     const auto* dst_raw = dst_chunk->raw_values();
 
+    #pragma omp parallel for schedule(dynamic) num_threads(num_threads)
     for(int64_t row = 0; row < src_chunk->length(); ++row) {
         auto src_id = src_prop_index_map.find(src_raw[row]);
         auto dst_id = dst_prop_index_map.find(dst_raw[row]);
@@ -160,7 +162,7 @@ void CollectRowNumers(const std::shared_ptr<arrow::ChunkedArray>& column,
 std::string DoMerge(const py::dict& config_dict)
 {
     logger("Mege started");
-    size_t num_threads = omp_get_max_threads() / 3 * 2;
+    size_t num_threads = omp_get_max_threads();
 
     // getting config data
     MergeConfig merge_config;
@@ -647,29 +649,30 @@ std::string DoMerge(const py::dict& config_dict)
             }
 
             //       For each edge, save info about it in edges_translation[row_in_data_postition]
-            if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)
+            num_threads = omp_get_max_threads() / 2;
+            if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)  // NOTE: 22 min (22-01-01)
                 MakeEdgeData<arrow::Int64Array, arrow::Int64Array>(
                     src_column, dst_column, edges_translation,
                     vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
+                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), num_threads
                 );
             else if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT32)
                 MakeEdgeData<arrow::Int64Array, arrow::Int32Array>(
                     src_column, dst_column, edges_translation,
                     vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
+                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), num_threads
                 );
             else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT64)
                 MakeEdgeData<arrow::Int32Array, arrow::Int64Array>(
                     src_column, dst_column, edges_translation,
                     vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
+                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), num_threads
                 );
             else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT32)
                 MakeEdgeData<arrow::Int32Array, arrow::Int32Array>(
                     src_column, dst_column, edges_translation,
                     vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop))
+                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), num_threads
                 );
             else {
                 throw std::runtime_error("Merge: Unsupported type combination");
@@ -712,9 +715,14 @@ std::string DoMerge(const py::dict& config_dict)
                     num_threads,
                     std::vector<std::vector<int64_t>>(num_of_chunks)
                 );
+                for (int t = 0; t < num_threads; ++t) {
+                    for (int c = 0; c < num_of_chunks; ++c) {
+                        edge_to_chunk_mapping[t][c].reserve(graph_info->GetEdgeInfos()[0]->GetChunkSize() * 5 / num_threads);  
+                    } // WARNING: depends on the graph, better choose constant manually for each launch
+                }
 
-                logger("    Mapping edge row to its chunk.");
-                #pragma omp parallel for schedule(dynamic) num_threads(num_threads)
+                logger("    Mapping edge row to its chunk.");  // NOTE: 33 mins (22-01-01), too long
+                #pragma omp parallel for schedule(static) num_threads(num_threads)
                 for(int64_t i = 0; i < edges_translation.size(); ++i) {
 
                     // define graphar vertex id 
@@ -755,10 +763,6 @@ std::string DoMerge(const py::dict& config_dict)
 
                     auto& edge_chunk_path = parts[i];
                     int64_t edge_chunk_idx = extract_tailing_number(edge_chunk_path);
-                    #pragma omp critical
-                    {
-                        logger("      Reading source of part"+std::to_string(edge_chunk_idx));
-                    }
 
                     // calculate number of edges
                     int64_t num_of_edges_in_chunk = 0;
@@ -781,10 +785,6 @@ std::string DoMerge(const py::dict& config_dict)
                               [](const EdgeSmall& a, const EdgeSmall& b){return a.src == b.src ? a.dst < b.dst : a.src < b.src;});
 
                     // read one edge chunk and make builder for it
-                    #pragma omp critical
-                    {
-                        logger("      Building part"+std::to_string(edge_chunk_idx));
-                    }
                     for (const auto& chunk : std::filesystem::directory_iterator(edge_chunk_path.path())) {
                         arrow::Int64Builder builder;
                         std::shared_ptr<arrow::Int64Array> src_column, dst_column;
@@ -829,15 +829,15 @@ std::string DoMerge(const py::dict& config_dict)
                                                                      edge_chunk_idx, extract_tailing_number(chunk), 
                                                                      StringToValidateLevel(edge.validate_level));
 
-                        #pragma omp critical
-                        {
-                            logger("[DEBUG]  Wrote chunk: "+std::to_string(edge_chunk_idx));
-                            processed_chunks += 1;
-                            logger("      Processed "+std::to_string(processed_chunks)+" edge chunks.");
-                        }
                         if(!status.ok()) {
                             logger("[ERROR] Could not write chunk: " + status.message());
                         } 
+                    }
+
+                    #pragma omp critical
+                    {
+                        processed_chunks += 1;
+                        logger("      Processed "+std::to_string(processed_chunks)+"/" + std::to_string(parts.size()) + " edge chunks.");
                     }
                 } 
             }
