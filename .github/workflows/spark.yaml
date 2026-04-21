@@ -1,0 +1,190 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: GraphAr Spark CI
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+    paths:
+      - 'maven-projects/spark/**'
+      - '.github/workflows/spark.yaml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'maven-projects/spark/**'
+      - '.github/workflows/spark.yaml'
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.event.number || github.head_ref || github.sha }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-20.04
+    if: ${{ !contains(github.event.pull_request.title, 'WIP') && github.event.pull_request.draft == false }}
+    env:
+      GAR_TEST_DATA: ${{ github.workspace }}/graphar-testing/
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mvn-profile: "datasources-32"
+            spark: "spark-3.2.4"
+            spark-hadoop: "spark-3.2.4-bin-hadoop3.2"
+          - mvn-profile: "datasources-33"
+            spark: "spark-3.3.4"
+            spark-hadoop: "spark-3.3.4-bin-hadoop3"
+          - mvn-profile: "datasources-34"
+            spark: "spark-3.4.3"
+            spark-hadoop: "spark-3.4.3-bin-hadoop3"
+          - mvn-profile: "datasources-35"
+            spark: "spark-3.5.1"
+            spark-hadoop: "spark-3.5.1-bin-hadoop3"
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+          submodules: true
+
+    - name: Code Format Check
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        mvn --no-transfer-progress spotless:check
+
+    - name: Download test data
+      run: |
+        git clone https://github.com/apache/incubator-graphar-testing.git $GAR_TEST_DATA --depth 1
+
+    - name: Build GraphAr Spark
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        echo "Build ${{ matrix.mvn-profile }}"
+        mvn --no-transfer-progress clean package -DskipTests -Dspotless.check.skip=true -P ${{ matrix.mvn-profile }}
+    
+    - name: Build Spark Docs
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        echo "Build ${{ matrix.mvn-profile }}"
+        # FIXME: the install is not necessary, but it is a workaround for the issue
+        mvn install --no-transfer-progress --no-transfer-progress -DskipTests -Dspotless.check.skip=true
+        mvn --no-transfer-progress scala:doc
+
+    - name: Run test
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        export SPARK_TESTING=1
+        echo "Test ${{ matrix.mvn-profile }}"
+        mvn test --no-transfer-progress -Dspotless.check.skip=true -P ${{ matrix.mvn-profile }}
+
+    - name: Generate JaCoCo Coverage Report
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        mvn jacoco:report --no-transfer-progress -P ${{ matrix.mvn-profile }}
+        
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        files: "./maven-projects/spark/graphar/target/site/jacoco/jacoco.xml"
+        token: ${{ secrets.CODECOV_TOKEN }}
+
+    - name: Run Neo4j2GraphAr example
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        scripts/get-spark-to-home.sh ${{ matrix.spark }} ${{ matrix.spark-hadoop }}
+        export SPARK_HOME="${HOME}/${{ matrix.spark-hadoop }}"
+        export PATH="${SPARK_HOME}/bin":"${PATH}"
+
+        scripts/get-neo4j-to-home.sh
+        export NEO4J_HOME="${HOME}/neo4j-community-4.4.23"
+        export PATH="${NEO4J_HOME}/bin":"${PATH}"
+        neo4j-admin set-initial-password neo4j
+
+        scripts/deploy-neo4j-movie-data.sh
+
+        scripts/build.sh ${{ matrix.mvn-profile }}
+
+        export NEO4J_USR="neo4j"
+        export NEO4J_PWD="neo4j"
+        scripts/run-neo4j2graphar.sh
+
+        # clean the movie data and import from GraphAr
+        echo "match (a) -[r] -> () delete a, r;match (a) delete a;" | cypher-shell -u ${NEO4J_USR} -p ${NEO4J_PWD} -d neo4j --format plain
+        scripts/run-graphar2neo4j.sh
+
+    # Apache Spark version 3.4.3 is not supported by the current NebulaGraph Spark Connector.
+    - name: Run Nebula2GraphAr example
+      # https://github.com/orgs/community/discussions/37883#discussioncomment-4021318
+      if: ${{ matrix.spark < 'spark-3.4.3' }}
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        scripts/get-nebula-to-home.sh
+        export SPARK_HOME="${HOME}/${{ matrix.spark-hadoop }}"
+        export PATH="${SPARK_HOME}/bin":"${PATH}"
+
+        scripts/get-nebula-to-home.sh
+
+        scripts/deploy-nebula-default-data.sh
+
+        scripts/build.sh ${{ matrix.mvn-profile }}
+
+        scripts/run-nebula2graphar.sh
+
+        # clean the data
+        docker run \
+            --rm \
+            --name nebula-console-loader \
+            --network nebula-docker-env_nebula-net \
+            vesoft/nebula-console:nightly -addr 172.28.3.1 -port 9669 -u root -p nebula -e "use basketballplayer; clear space basketballplayer;"
+
+        # import from GraphAr
+        scripts/run-graphar2nebula.sh
+
+    - name: Run Neo4j importer
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        export SPARK_HOME="${HOME}/${{ matrix.spark-hadoop }}"
+        export PATH="${SPARK_HOME}/bin":"${PATH}"
+
+        scripts/build.sh ${{ matrix.mvn-profile }}
+
+        # run the importer
+        cd import
+        ./neo4j.sh neo4j.json
+
+    - name: Run LdbcSample2GraphAr example
+      working-directory: maven-projects/spark
+      run: |
+        export JAVA_HOME=${JAVA_HOME_11_X64}
+        export SPARK_HOME="${HOME}/${{ matrix.spark-hadoop }}"
+        export PATH="${SPARK_HOME}/bin":"${PATH}"
+
+        scripts/build.sh ${{ matrix.mvn-profile }}
+
+        scripts/run-ldbc-sample2graphar.sh
