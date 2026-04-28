@@ -10,6 +10,7 @@
 #include "graphar/high-level/edges_builder.h"
 #include "graphar/arrow/chunk_writer.h"
 #include "graphar/graph_info.h"
+#include "importer.h"
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
@@ -135,6 +136,56 @@ void MakeEdgeData(const std::shared_ptr<arrow::ChunkedArray> src_column,
 
         edge_translation[row] = EdgeSmall{src_id->second, dst_id->second, row};
     }
+}
+
+template <typename SrcColumnType, typename DstColumnType>
+std::vector<EdgeSmall> ExtractEdges(
+                  const std::shared_ptr<arrow::ChunkedArray> src_column,
+                  const std::shared_ptr<arrow::ChunkedArray> dst_column,
+                  const std::unordered_map<int64_t, graphar::IdType>& src_prop_index_map,
+                  const std::unordered_map<int64_t, graphar::IdType>& dst_prop_index_map,
+                  std::vector<std::vector<std::vector<int64_t>>>& edge_to_chunk_mapping,
+                  int64_t num_of_edges_in_chunk, int edge_chunk_idx,
+                  const int num_threads = 1) {
+
+    std::vector<EdgeSmall> new_chunk_edges(num_of_edges_in_chunk);
+
+    auto src_chunk = std::static_pointer_cast<SrcColumnType>(src_column->chunk(0));
+    auto dst_chunk = std::static_pointer_cast<DstColumnType>(dst_column->chunk(0));
+
+    // both src & dst are not nullable, use raw_values
+    const auto* src_raw = src_chunk->raw_values();
+    const auto* dst_raw = dst_chunk->raw_values();
+
+    for(int thread = 0; thread < edge_to_chunk_mapping.size(); ++thread) {
+        for(int64_t edge_idx : edge_to_chunk_mapping[thread][edge_chunk_idx]) {
+            auto val_src = src_prop_index_map.find(src_raw[edge_idx]);
+            auto val_dst = dst_prop_index_map.find(dst_raw[edge_idx]);
+
+            if (val_src == src_prop_index_map.end() || val_dst == dst_prop_index_map.end()) {
+                bool src_found = (val_src != src_prop_index_map.end());
+                bool dst_found = (val_dst != dst_prop_index_map.end());
+
+                /*std::cout << "[WARNING] some vertices of the edge " << src_raw[edge_idx] << "->" << dst_raw[edge_idx] 
+                            << " were not found in graph:" 
+                            << "src: " << val_src == src_prop_index_map.end() ? "not found" : "found" 
+                            << ", dst: " << val_dst == dst_prop_index_map.end() ? "not found" : "found" 
+                            << std::endl;*/
+                continue;
+            }
+
+            new_chunk_edges.emplace_back(EdgeSmall{
+                val_src->second,
+                val_dst->second,
+                edge_idx
+            });
+        }
+
+        // clear additional data
+        edge_to_chunk_mapping[thread][edge_chunk_idx].clear();
+        std::vector<int64_t>().swap(edge_to_chunk_mapping[thread][edge_chunk_idx]);
+    }
+    return new_chunk_edges;
 }
 
 template <typename ArrowArrayType>
@@ -648,37 +699,6 @@ std::string DoMerge(const py::dict& config_dict)
                 throw std::runtime_error("Edge src PK property column '" + edge.dst_edge_prop + "' has NULL values.");
             }
 
-            //       For each edge, save info about it in edges_translation[row_in_data_postition]
-            num_threads = omp_get_max_threads() / 2;
-            if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)  // NOTE: 22 min (22-01-01)
-                MakeEdgeData<arrow::Int64Array, arrow::Int64Array>(
-                    src_column, dst_column, edges_translation,
-                    vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), num_threads
-                );
-            else if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT32)
-                MakeEdgeData<arrow::Int64Array, arrow::Int32Array>(
-                    src_column, dst_column, edges_translation,
-                    vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), num_threads
-                );
-            else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT64)
-                MakeEdgeData<arrow::Int32Array, arrow::Int64Array>(
-                    src_column, dst_column, edges_translation,
-                    vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), num_threads
-                );
-            else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT32)
-                MakeEdgeData<arrow::Int32Array, arrow::Int32Array>(
-                    src_column, dst_column, edges_translation,
-                    vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                    vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), num_threads
-                );
-            else {
-                throw std::runtime_error("Merge: Unsupported type combination");
-            }
-            logger("    Edge src&dst ids calculated.");
-
             // 2.2.4 Work with each adj_lists type required by user
             for (const auto& adj_list : edge.adj_lists) {  // TODO: user demands adj_list that does not exist in original graph
                 logger("    Working with adj_list aligned by "+adj_list.aligned_by);
@@ -721,20 +741,42 @@ std::string DoMerge(const py::dict& config_dict)
                     } // WARNING: depends on the graph, better choose constant manually for each launch
                 }
 
-                logger("    Mapping edge row to its chunk.");  // NOTE: 33 mins (22-01-01), too long
-                #pragma omp parallel for schedule(static) num_threads(num_threads)
-                for(int64_t i = 0; i < edges_translation.size(); ++i) {
-
-                    // define graphar vertex id 
-                    int64_t vertex_id = -1;
-                    if(aligned_by_src) {
-                        vertex_id = edges_translation[i].src;
-                    } else {
-                        vertex_id = edges_translation[i].dst;
+                // use importer approach
+                logger("    Mapping edge row to its chunk.");
+                if (adj_lst->GetType() == graphar::AdjListType::ordered_by_source ||
+                    adj_lst->GetType() == graphar::AdjListType::unordered_by_source)
+                {
+                    if (src_prop_type == arrow::Type::INT64) {
+                        PreProcessArray<arrow::Int64Array>(
+                            src_column->chunk(0), edge_to_chunk_mapping,
+                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)), 
+                            num_threads, edge_info->GetSrcChunkSize());
                     }
-
-                    // add row number of edge in table into chunk
-                    edge_to_chunk_mapping[omp_get_thread_num()][vertex_id/vertex_chunk_size].push_back(i);
+                    else if (src_prop_type == arrow::Type::INT32) {
+                        PreProcessArray<arrow::Int32Array>(
+                            src_column->chunk(0), edge_to_chunk_mapping,
+                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)), 
+                            num_threads, edge_info->GetDstChunkSize());
+                    }
+                    else {
+                        throw std::runtime_error("Unsupported type");
+                    }
+                } else {
+                    if (dst_prop_type == arrow::Type::INT64) {
+                        PreProcessArray<arrow::Int64Array>(
+                            dst_column->chunk(0), edge_to_chunk_mapping,
+                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), 
+                            num_threads, edge_info->GetSrcChunkSize());
+                    }
+                    else if (dst_prop_type == arrow::Type::INT32) {
+                        PreProcessArray<arrow::Int32Array>(
+                            dst_column->chunk(0), edge_to_chunk_mapping,
+                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), 
+                            num_threads, edge_info->GetDstChunkSize());
+                    }
+                    else {
+                        throw std::runtime_error("Unsupported type");
+                    }
                 }
                 logger("    Mapping complete.");
 
@@ -757,7 +799,7 @@ std::string DoMerge(const py::dict& config_dict)
                 //num_threads = omp_get_max_threads() / 4;
                 num_threads = 1;
                 int processed_chunks = 0;
-                logger("    Building edges with " + std::to_string(num_threads) + " threads.");
+                logger("    Building edges in " + std::to_string(num_threads) + " threads.");
                 #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, parts.size()))
                 for (int64_t i = 0; i < parts.size(); ++i) {
 
@@ -770,20 +812,42 @@ std::string DoMerge(const py::dict& config_dict)
                         num_of_edges_in_chunk += edge_to_chunk_mapping[thread][edge_chunk_idx].size();
                     }
 
-                    // collect edges from edges_translation by edge_chunk_idx, sort them
-                    std::vector<EdgeSmall> new_chunk_edges(num_of_edges_in_chunk);
-                    for(int thread = 0; thread < edge_to_chunk_mapping.size(); ++thread) {
-                        for(int64_t edge_idx : edge_to_chunk_mapping[thread][edge_chunk_idx]) {
-                            new_chunk_edges.emplace_back(edges_translation[edge_idx]);
-                        }
+                    // collect edges by edge_chunk_idx, sort them
+                    std::vector<EdgeSmall> new_chunk_edges;
+                    if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)
+                        new_chunk_edges = ExtractEdges<arrow::Int64Array, arrow::Int64Array>(
+                            src_column, dst_column, 
+                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
+                            edge_to_chunk_mapping, num_of_edges_in_chunk, edge_chunk_idx, num_threads  
+                        );
+                    else if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT32)
+                        new_chunk_edges = ExtractEdges<arrow::Int64Array, arrow::Int32Array>(
+                            src_column, dst_column,
+                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
+                            edge_to_chunk_mapping, num_of_edges_in_chunk, edge_chunk_idx, num_threads
+                        );
+                    else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT64)
+                        new_chunk_edges = ExtractEdges<arrow::Int32Array, arrow::Int64Array>(
+                            src_column, dst_column, 
+                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
+                            edge_to_chunk_mapping, num_of_edges_in_chunk, edge_chunk_idx, num_threads
+                        );
+                    else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT32)
+                        new_chunk_edges = ExtractEdges<arrow::Int32Array, arrow::Int32Array>(
+                            src_column, dst_column, 
+                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
+                            edge_to_chunk_mapping, num_of_edges_in_chunk, edge_chunk_idx, num_threads
+                        );
+                    else
+                        throw std::runtime_error("Unsupported type combination");
 
-                        // clear additional data
-                        edge_to_chunk_mapping[thread][edge_chunk_idx].clear();
-                        std::vector<int64_t>().swap(edge_to_chunk_mapping[thread][edge_chunk_idx]);
-                    }
                     std::sort(new_chunk_edges.begin(), new_chunk_edges.end(),
                               [](const EdgeSmall& a, const EdgeSmall& b){return a.src == b.src ? a.dst < b.dst : a.src < b.src;});
-
+ 
                     // read one edge chunk and make builder for it
                     for (const auto& chunk : std::filesystem::directory_iterator(edge_chunk_path.path())) {
                         arrow::Int64Builder builder;
