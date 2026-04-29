@@ -166,11 +166,11 @@ std::vector<EdgeSmall> ExtractEdges(
                 bool src_found = (val_src != src_prop_index_map.end());
                 bool dst_found = (val_dst != dst_prop_index_map.end());
 
-                /*std::cout << "[WARNING] some vertices of the edge " << src_raw[edge_idx] << "->" << dst_raw[edge_idx] 
+                std::cout << "[WARNING] some vertices of the edge " << src_raw[edge_idx] << "->" << dst_raw[edge_idx] 
                             << " were not found in graph:" 
-                            << "src: " << val_src == src_prop_index_map.end() ? "not found" : "found" 
-                            << ", dst: " << val_dst == dst_prop_index_map.end() ? "not found" : "found" 
-                            << std::endl;*/
+                            << "src: " << (src_found ? "found" : "not found, ") 
+                            << "dst: " << (dst_found ? "found" : "not found.") 
+                            << std::endl;
                 continue;
             }
 
@@ -742,7 +742,7 @@ std::string DoMerge(const py::dict& config_dict)
                 }
 
                 // use importer approach
-                logger("    Mapping edge row to its chunk.");
+                logger("    Mapping edge row to its chunk in "+std::to_string(num_threads)+" threads.");
                 if (adj_lst->GetType() == graphar::AdjListType::ordered_by_source ||
                     adj_lst->GetType() == graphar::AdjListType::unordered_by_source)
                 {
@@ -796,8 +796,8 @@ std::string DoMerge(const py::dict& config_dict)
                 }
 
                 std::vector<std::string> column_names = {graphar::GeneralParams::kSrcIndexCol, graphar::GeneralParams::kDstIndexCol};
-                //num_threads = omp_get_max_threads() / 4;
-                num_threads = 1;
+                num_threads = omp_get_max_threads() / 4;
+                //num_threads = 2;
                 int processed_chunks = 0;
                 logger("    Building edges in " + std::to_string(num_threads) + " threads.");
                 #pragma omp parallel for schedule(dynamic) num_threads(std::min(num_threads, parts.size()))
