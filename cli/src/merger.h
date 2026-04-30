@@ -148,7 +148,8 @@ std::vector<EdgeSmall> ExtractEdges(
                   int64_t num_of_edges_in_chunk, int edge_chunk_idx,
                   const int num_threads = 1) {
 
-    std::vector<EdgeSmall> new_chunk_edges(num_of_edges_in_chunk);
+    std::vector<EdgeSmall> new_chunk_edges;
+    new_chunk_edges.reserve(num_of_edges_in_chunk);
 
     auto src_chunk = std::static_pointer_cast<SrcColumnType>(src_column->chunk(0));
     auto dst_chunk = std::static_pointer_cast<DstColumnType>(dst_column->chunk(0));
@@ -206,6 +207,60 @@ void CollectRowNumers(const std::shared_ptr<arrow::ChunkedArray>& column,
             } else {
                 pk2row.Append(val->second);
             }
+        }
+    }
+}
+
+void ConstructBuilderBinsearch(
+    arrow::Int64Builder& builder,
+    const int64_t* src_column_raw, const int64_t* dst_column_raw,
+    std::vector<EdgeSmall>& new_chunk_edges,
+    int64_t length) {
+
+    for(int64_t i = 0; i < length; ++i) {
+        int64_t src = src_column_raw[i];
+        int64_t dst = dst_column_raw[i];
+
+        // search for this edge
+        auto it = std::lower_bound(new_chunk_edges.begin(), new_chunk_edges.end(), EdgeSmall{src, dst, -1});
+        if (it != new_chunk_edges.end() && it->src == src && it->dst == dst) {
+            builder.Append(it->row);
+        } else {
+            builder.AppendNull();
+        }
+    }
+}
+
+void ConstructBuilderLinear(
+    arrow::Int64Builder& builder,
+    const int64_t* src_column_raw, const int64_t* dst_column_raw,
+    std::vector<EdgeSmall>& new_chunk_edges,
+    int64_t length, bool ordered_by_src) {
+
+    int64_t last_valid_edge = 0;
+    for(int64_t i = 0; i < length; ++i) {
+        int64_t src = src_column_raw[i];
+        int64_t dst = dst_column_raw[i];
+
+        // in case user gave additional edges, we must skip them
+        while(last_valid_edge < new_chunk_edges.size()) { 
+            if (ordered_by_src && 
+                (new_chunk_edges[last_valid_edge].src < src || (new_chunk_edges[last_valid_edge].src == src && new_chunk_edges[last_valid_edge].dst < dst))
+                || !ordered_by_src && 
+                (new_chunk_edges[last_valid_edge].dst < dst || (new_chunk_edges[last_valid_edge].dst == dst && new_chunk_edges[last_valid_edge].src < src))) {
+                ++last_valid_edge;
+            } else {
+                break; 
+            }
+        }
+
+        // search for this edge
+        if(last_valid_edge < new_chunk_edges.size() && 
+            new_chunk_edges[last_valid_edge].src == src && new_chunk_edges[last_valid_edge].dst == dst) {
+            builder.Append(new_chunk_edges[last_valid_edge].row);
+            ++last_valid_edge;
+        } else {
+            builder.AppendNull();
         }
     }
 }
@@ -845,8 +900,15 @@ std::string DoMerge(const py::dict& config_dict)
                     else
                         throw std::runtime_error("Unsupported type combination");
 
-                    std::sort(new_chunk_edges.begin(), new_chunk_edges.end(),
+                    // Case 1: ordered by src/dst -> we can use linear search, if we sort edges by src/dst
+                    // Case 2: unordered -> we must use binsearch, so sort everything by src
+                    if (adj_lst->GetType() != graphar::AdjListType::ordered_by_dest) {
+                        std::sort(new_chunk_edges.begin(), new_chunk_edges.end(),
                               [](const EdgeSmall& a, const EdgeSmall& b){return a.src == b.src ? a.dst < b.dst : a.src < b.src;});
+                    } else {
+                        std::sort(new_chunk_edges.begin(), new_chunk_edges.end(),
+                              [](const EdgeSmall& a, const EdgeSmall& b){return a.dst == b.dst ? a.src < b.src : a.dst < b.dst;});
+                    }
  
                     // read one edge chunk and make builder for it
                     for (const auto& chunk : std::filesystem::directory_iterator(edge_chunk_path.path())) {
@@ -863,18 +925,16 @@ std::string DoMerge(const py::dict& config_dict)
                         const auto* src_column_raw = src_column->raw_values();
                         const auto* dst_column_raw = dst_column->raw_values();
 
-                        for(int64_t i = 0; i < src_column->length(); ++i) {
-                            int64_t src = src_column_raw[i];
-                            int64_t dst = dst_column_raw[i];
-
-                            // search for this edge
-                            auto it = std::lower_bound(new_chunk_edges.begin(), new_chunk_edges.end(), EdgeSmall{src, dst, -1});
-                            if (it != new_chunk_edges.end() && it->src == src && it->dst == dst) {
-                                builder.Append(it->row);
-                            } else {
-                                builder.AppendNull();
-                            }
+                        // construct builder
+                        if (adj_lst->GetType() == graphar::AdjListType::unordered_by_dest || adj_lst->GetType() == graphar::AdjListType::unordered_by_source) {
+                            // when adj_lists are unordered, we will have to do binsearch on ordered by src user edges for each adj_lists edge
+                            ConstructBuilderBinsearch(builder, src_column_raw, dst_column_raw, new_chunk_edges, src_column->length());
+                        } else {
+                            // when adj_lists are ordered by src/dst, we can order our edges by src/dst and 'merge' them for O(n)
+                            ConstructBuilderLinear(builder, src_column_raw, dst_column_raw, new_chunk_edges, src_column->length(), 
+                                                    adj_lst->GetType() == graphar::AdjListType::ordered_by_source ? true : false);
                         }
+
                         src_column.reset();
                         dst_column.reset();
 
