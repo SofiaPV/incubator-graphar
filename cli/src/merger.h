@@ -553,7 +553,7 @@ std::string DoMerge(const py::dict& config_dict)
             std::vector<std::string> column_names = {vertex_prop, graphar::GeneralParams::kVertexIndexCol};
             
             for (const auto& file : std::filesystem::directory_iterator(path_to_graphar_pg)) {  // TODO: omp (8 minutes on 22-01-01)
-                std::shared_ptr<arrow::Table> vertex_chunk_prop_columns =                       // TODO: combine chunks ???
+                std::shared_ptr<arrow::Table> vertex_chunk_prop_columns =                    
                                 GetDataFromParquetFile(file.path().string(), column_names);
                 switch(vertex_chunk_prop_columns->GetColumnByName(vertex_prop)->chunk(0)->type_id()) {
                     case arrow::Type::INT32:
@@ -624,7 +624,8 @@ std::string DoMerge(const py::dict& config_dict)
             for (const auto& source : edge.sources) {
 
                 // collect properties that are defined in this source 
-                std::vector<std::string> prop_names_in_source(source.columns.size());
+                std::vector<std::string> prop_names_in_source;
+                prop_names_in_source.reserve(source.columns.size());
                 for (const auto& [data_column_name, prop_name] : source.columns) {
                     prop_names_in_source.push_back(prop_name);
                 }
@@ -714,8 +715,6 @@ std::string DoMerge(const py::dict& config_dict)
             logger("[DEBUG] after CombineChunks()");
 
             // 2.2.3 For each row define src&dst graphar ids, remember the row with data.
-            //       Create vector to store this data
-            std::vector<EdgeSmall> edges_translation(pg_data_table->num_rows());
             
             //       Get columns with src&dst
             std::shared_ptr<arrow::ChunkedArray> src_column_tmp = pg_data_table->GetColumnByName(reversed_columns[edge.src_edge_prop]);
