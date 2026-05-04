@@ -80,6 +80,24 @@ class GraphArConfig(GrapArBaseConfig):
 
 
 class GraphArMergeConfig(GrapArBaseConfig):
+    tmp_path: Optional[str] = None
+
+    @field_validator('tmp_path', mode='before')
+    @classmethod
+    def validate_tmp_path(cls, v):
+        if v is None or v == '':
+            return ''
+
+        path = Path(v).resolve().absolute()
+
+        if not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
+        elif any(path.iterdir()):
+            msg = f"Warning: Path {path} already exists and contains files."
+            logger.warning(msg)
+        
+        return str(path)
+
     @model_validator(mode='after')
     def check_path(self):
         path = Path(self.path).resolve().absolute()
