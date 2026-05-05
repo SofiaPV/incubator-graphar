@@ -51,6 +51,48 @@ int extract_tailing_number(const std::filesystem::path& filename) {
     return std::stoi(number);
 }
 
+/*==================== Iterating vectors or files ====================*/
+class VectorStream {
+public:
+    VectorStream(std::vector<std::vector<std::vector<int64_t>>>& data, int chunk_idx)
+        : data_(data), idx_(chunk_idx) {}
+
+    bool next(int64_t& value) {
+        while (pos_ >= data_[th][idx_].size()) {
+            // clear used data (we guarantee, that no other thread will ever need this data)
+            data_[th][idx_].clear();
+            std::vector<int64_t>().swap(data_[th][idx_]);
+
+            // move to the next thread output
+            ++th; 
+            pos_ = 0;
+            if (th >= data_.size()) return false;
+        }
+        value = data_[th][idx_][pos_++];
+        return true;
+    }
+
+private:
+    std::vector<std::vector<std::vector<int64_t>>>& data_;
+    size_t pos_ = 0, th = 0;
+    int idx_;
+};
+
+
+template <typename F>
+void with_streamer(bool use_file,
+                   std::vector<std::vector<std::vector<int64_t>>>& vec,
+                   const std::string& filename, int chunk_idx,
+                   F&& f) {
+    if (use_file) {
+        //FileStream s(filename);
+        //f(s);
+    } else {
+        VectorStream s(vec, chunk_idx);
+        f(s);
+    }
+}
+
 template <typename ArrowArrayType>
 void MapPK2row(const std::shared_ptr<arrow::ChunkedArray>& column,
                std::unordered_map<int64_t, graphar::IdType>& map) {
@@ -138,17 +180,15 @@ void MakeEdgeData(const std::shared_ptr<arrow::ChunkedArray> src_column,
     }
 }
 
-template <typename SrcColumnType, typename DstColumnType>
+template <typename SrcColumnType, typename DstColumnType, typename Streamer>
 std::vector<EdgeSmall> ExtractEdges(
+                  Streamer& streamer,
                   const std::shared_ptr<arrow::ChunkedArray> src_column,
                   const std::shared_ptr<arrow::ChunkedArray> dst_column,
                   const std::unordered_map<int64_t, graphar::IdType>& src_prop_index_map,
                   const std::unordered_map<int64_t, graphar::IdType>& dst_prop_index_map,
-                  std::vector<std::vector<std::vector<int64_t>>>& edge_to_chunk_mapping,
-                  int64_t num_of_edges_in_chunk, int edge_chunk_idx,
-                  const int num_threads = 1) {
+                  int64_t num_of_edges_in_chunk, std::vector<EdgeSmall>& new_chunk_edges) {
 
-    std::vector<EdgeSmall> new_chunk_edges;
     new_chunk_edges.reserve(num_of_edges_in_chunk);
 
     auto src_chunk = std::static_pointer_cast<SrcColumnType>(src_column->chunk(0));
@@ -158,33 +198,29 @@ std::vector<EdgeSmall> ExtractEdges(
     const auto* src_raw = src_chunk->raw_values();
     const auto* dst_raw = dst_chunk->raw_values();
 
-    for(int thread = 0; thread < edge_to_chunk_mapping.size(); ++thread) {
-        for(int64_t edge_idx : edge_to_chunk_mapping[thread][edge_chunk_idx]) {
-            auto val_src = src_prop_index_map.find(src_raw[edge_idx]);
-            auto val_dst = dst_prop_index_map.find(dst_raw[edge_idx]);
+    // TODO: while-iterator for vector & file with unified interface
+    int64_t edge_idx;
+    while (streamer.next(edge_idx)) {
+        auto val_src = src_prop_index_map.find(src_raw[edge_idx]);
+        auto val_dst = dst_prop_index_map.find(dst_raw[edge_idx]);
 
-            if (val_src == src_prop_index_map.end() || val_dst == dst_prop_index_map.end()) {
-                bool src_found = (val_src != src_prop_index_map.end());
-                bool dst_found = (val_dst != dst_prop_index_map.end());
+        if (val_src == src_prop_index_map.end() || val_dst == dst_prop_index_map.end()) {
+            bool src_found = (val_src != src_prop_index_map.end());
+            bool dst_found = (val_dst != dst_prop_index_map.end());
 
-                std::cout << "[WARNING] some vertices of the edge " << src_raw[edge_idx] << "->" << dst_raw[edge_idx] 
-                            << " were not found in graph:" 
-                            << "src: " << (src_found ? "found" : "not found, ") 
-                            << "dst: " << (dst_found ? "found" : "not found.") 
-                            << std::endl;
-                continue;
-            }
-
-            new_chunk_edges.emplace_back(EdgeSmall{
-                val_src->second,
-                val_dst->second,
-                edge_idx
-            });
+            std::cout << "[WARNING] some vertices of the edge " << src_raw[edge_idx] << "->" << dst_raw[edge_idx] 
+                        << " were not found in graph:" 
+                        << "src: " << (src_found ? "found" : "not found, ") 
+                        << "dst: " << (dst_found ? "found" : "not found.") 
+                        << std::endl;
+            continue;
         }
 
-        // clear additional data
-        edge_to_chunk_mapping[thread][edge_chunk_idx].clear();
-        std::vector<int64_t>().swap(edge_to_chunk_mapping[thread][edge_chunk_idx]);
+        new_chunk_edges.emplace_back(EdgeSmall{
+            val_src->second,
+            val_dst->second,
+            edge_idx
+        });
     }
     return new_chunk_edges;
 }
@@ -264,6 +300,42 @@ void ConstructBuilderLinear(
         }
     }
 }
+
+
+std::string make_mapping_path(std::string user_tmp, int chunk) {
+    return user_tmp + "/chunk_" + std::to_string(chunk) + ".bin";
+}
+
+/* Designed to write edge_to_chunk_mapping into files.
+*  Files will be stored in user-specified_tmp_path/mapping directory, named 'chunk_k.bin'.
+*/
+bool WriteMappingNClearVector(std::vector<std::vector<std::vector<int64_t>>>& data,
+                              std::string& tmp_path) {
+    bool is_ok = true;
+
+    for(int chunk = 0; chunk < data[0].size() && is_ok; ++chunk) {
+        std::string path_to_chunk = tmp_path + "/chunk_" + std::to_string(chunk); 
+        for(int t = 0; t < data.size(); ++t) {
+            try {
+                append_to_bin(data[t][chunk], path_to_chunk);
+            } catch (const std::exception& e) {
+                std::cout << "[ERROR] append_to_bin failed: " << e.what() << "\n";
+                is_ok = false;
+                break;
+            }
+        }
+    }
+
+    if(is_ok) {
+        data.clear();
+        std::vector<std::vector<std::vector<int64_t>>>().swap(data);
+        return true;
+    } else {
+        clear_directory(tmp_path);
+        return false;
+    }
+}
+
 
 std::string DoMerge(const py::dict& config_dict)
 {
@@ -834,6 +906,13 @@ std::string DoMerge(const py::dict& config_dict)
                 }
                 logger("    Mapping complete.");
 
+                // if tmp_path exists, write down chunks as chunk_i.bin; clear edge_to_chunk_mapping
+                bool wrote_tmp_files = false;
+                if(merge_config.tmp_path != "") {
+                    wrote_tmp_files = WriteMappingNClearVector(edge_to_chunk_mapping, merge_config.tmp_path);
+                    logger("    Wrote mapping to '"+merge_config.tmp_path+"'.");
+                }
+
                 // Edges are sorted by their chunks, we only need to:
                 // 1) Sort them the same way as in the original adj_lists (read only one edge chunk for that).
                 // 2) Create table by extracting values from the saved rows in correct order.
@@ -859,43 +938,60 @@ std::string DoMerge(const py::dict& config_dict)
 
                     auto& edge_chunk_path = parts[i];
                     int64_t edge_chunk_idx = extract_tailing_number(edge_chunk_path);
+                    std::string path_to_mapping = make_mapping_path(merge_config.tmp_path, edge_chunk_idx);
 
                     // calculate number of edges
                     int64_t num_of_edges_in_chunk = 0;
-                    for(int thread = 0; thread < edge_to_chunk_mapping.size(); ++thread) {
-                        num_of_edges_in_chunk += edge_to_chunk_mapping[thread][edge_chunk_idx].size();
+                    if(!wrote_tmp_files) {
+                        for(int thread = 0; thread < edge_to_chunk_mapping.size(); ++thread) {
+                            num_of_edges_in_chunk += edge_to_chunk_mapping[thread][edge_chunk_idx].size();
+                        }
+                    } else {
+                        num_of_edges_in_chunk = get_count_bin(path_to_mapping);
                     }
 
                     // collect edges by edge_chunk_idx, sort them
                     std::vector<EdgeSmall> new_chunk_edges;
                     if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)
-                        new_chunk_edges = ExtractEdges<arrow::Int64Array, arrow::Int64Array>(
-                            src_column, dst_column, 
-                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
-                            edge_to_chunk_mapping, num_of_edges_in_chunk, edge_chunk_idx, num_threads  
-                        );
+                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx,
+                        [&](auto& s) {
+                            ExtractEdges<arrow::Int64Array, arrow::Int64Array>(
+                                s, src_column, dst_column, 
+                                vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                                vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
+                                num_of_edges_in_chunk, new_chunk_edges
+                            );
+                        });
                     else if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT32)
-                        new_chunk_edges = ExtractEdges<arrow::Int64Array, arrow::Int32Array>(
-                            src_column, dst_column,
-                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
-                            edge_to_chunk_mapping, num_of_edges_in_chunk, edge_chunk_idx, num_threads
-                        );
+                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx,
+                        [&](auto& s) {
+                            ExtractEdges<arrow::Int32Array, arrow::Int64Array>(
+                                s, src_column, dst_column, 
+                                vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                                vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
+                                num_of_edges_in_chunk, new_chunk_edges
+                            );
+                        });
                     else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT64)
-                        new_chunk_edges = ExtractEdges<arrow::Int32Array, arrow::Int64Array>(
-                            src_column, dst_column, 
-                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
-                            edge_to_chunk_mapping, num_of_edges_in_chunk, edge_chunk_idx, num_threads
-                        );
+                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx,
+                        [&](auto& s) {
+                            ExtractEdges<arrow::Int64Array, arrow::Int32Array>(
+                                s, src_column, dst_column, 
+                                vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                                vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
+                                num_of_edges_in_chunk, new_chunk_edges
+                            );
+                        });
                     else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT32)
-                        new_chunk_edges = ExtractEdges<arrow::Int32Array, arrow::Int32Array>(
-                            src_column, dst_column, 
-                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
-                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
-                            edge_to_chunk_mapping, num_of_edges_in_chunk, edge_chunk_idx, num_threads
-                        );
+                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx,
+                        [&](auto& s) {
+                            ExtractEdges<arrow::Int32Array, arrow::Int32Array>(
+                                s, src_column, dst_column, 
+                                vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)),
+                                vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)),
+                                num_of_edges_in_chunk, new_chunk_edges
+                            );
+                        });
                     else
                         throw std::runtime_error("Unsupported type combination");
 

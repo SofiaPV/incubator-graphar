@@ -80,12 +80,14 @@ class GraphArConfig(GrapArBaseConfig):
 
 
 class GraphArMergeConfig(GrapArBaseConfig):
-    tmp_path: Optional[str] = None
+    tmp_path: str = ""
 
     @field_validator('tmp_path', mode='before')
     @classmethod
     def validate_tmp_path(cls, v):
+        print(f"iside validate_tmp_path")
         if v is None or v == '':
+            print(f"returning ''.")
             return ''
 
         path = Path(v).resolve().absolute()

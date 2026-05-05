@@ -42,6 +42,19 @@
 #include "graphar/graph_info.h"
 #include "parquet/arrow/reader.h"
 
+#include <vector>
+#include <string>
+#include <cstdint>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <stdexcept>
+#include <cstring>
+#include <filesystem>
+#include <sys/file.h>
+
+namespace fs = std::filesystem;
+
+
 std::string ConcatEdgeTriple(const std::string& src_type,
                              const std::string& edge_type,
                              const std::string& dst_type) {
@@ -336,6 +349,124 @@ std::shared_ptr<arrow::Table> GetDataFromFile(
   }
 }
 
+
+/*==================== Bin files in-out functions & settings ====================*/
+struct BinHeader {
+    uint32_t magic = 0x42494E31;
+    uint64_t count = 0;
+    uint32_t element_size = sizeof(int64_t);
+};
+
+
+class FileDescriptor {
+    int fd_;
+public:
+    explicit FileDescriptor(int fd) : fd_(fd) {}
+    ~FileDescriptor() {
+        if (fd_ != -1) close(fd_);
+    }
+    
+    FileDescriptor(const FileDescriptor&) = delete;
+    FileDescriptor& operator=(const FileDescriptor&) = delete;
+    
+    FileDescriptor(FileDescriptor&& other) noexcept : fd_(other.fd_) {
+        other.fd_ = -1;
+    }
+    
+    int get() const { return fd_; }
+    
+    void lock_exclusive() {
+        if (flock(fd_, LOCK_EX) != 0) {
+            throw std::runtime_error("Failed to lock file");
+        }
+    }
+    
+    void unlock() {
+        flock(fd_, LOCK_UN);
+    }
+};
+
+FileDescriptor open_bin(const std::string& path) {
+    int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd == -1) {
+        throw std::runtime_error("open failed: " + path);
+    }
+    return FileDescriptor(fd);
+}
+
+BinHeader read_header_bin(int fd) {
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < static_cast<off_t>(sizeof(BinHeader))) {
+        return BinHeader{};
+    }
+
+    BinHeader header;
+    ssize_t r = pread(fd, &header, sizeof(BinHeader), 0);
+    if (r != sizeof(BinHeader)) {
+        throw std::runtime_error("Failed to read header");
+    }
+
+    if (header.magic != 0x42494E31) {
+        throw std::runtime_error("Invalid file format");
+    }
+
+    return header;
+}
+
+
+int64_t get_count_bin(const std::string& path) {
+    FileDescriptor fd_guard = open_bin(path);
+    fd_guard.lock_exclusive();
+    
+    try {
+        BinHeader header = read_header_bin(fd_guard.get());
+        return static_cast<int64_t>(header.count);
+    } catch (...) {
+        fd_guard.unlock();
+        throw;
+    }
+}
+
+void append_to_bin(const std::vector<int64_t>& data, const std::string& path) {
+    FileDescriptor fd_guard = open_bin(path);
+    
+    fd_guard.lock_exclusive();
+
+    BinHeader header = read_header_bin(fd_guard.get());
+    uint64_t old_count = header.count;
+    uint64_t new_count = old_count + data.size();
+
+    // 1. Write data to the end of the file
+    off_t offset = sizeof(BinHeader) + old_count * sizeof(int64_t);
+    size_t bytes = data.size() * sizeof(int64_t);
+    
+    ssize_t w = pwrite(fd_guard.get(), data.data(), bytes, offset);
+    if (w != static_cast<ssize_t>(bytes)) {
+        throw std::runtime_error("Data write failed.");
+    }
+
+    // 2. Update header
+    header.count = new_count;
+
+    ssize_t hw = pwrite(fd_guard.get(), &header, sizeof(BinHeader), 0);
+    if (hw != sizeof(BinHeader)) {
+        throw std::runtime_error("Header write failed");
+    }
+    
+    if (fsync(fd_guard.get()) != 0) {
+        throw std::runtime_error("fsync failed");
+    }
+}
+
+
+void clear_directory(const std::string& path) {
+    for (const auto& entry : fs::directory_iterator(path)) {
+        fs::remove_all(entry.path());
+    }
+}
+
+
+/*==================== Table editing  ====================*/
 std::shared_ptr<arrow::Table> ChangeNameAndDataType(
     const std::shared_ptr<arrow::Table>& table,
     const std::unordered_map<
