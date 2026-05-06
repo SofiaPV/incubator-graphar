@@ -85,8 +85,8 @@ void with_streamer(bool use_file,
                    const std::string& filename, int chunk_idx,
                    F&& f) {
     if (use_file) {
-        //FileStream s(filename);
-        //f(s);
+        FileStream s(filename);
+        f(s);
     } else {
         VectorStream s(vec, chunk_idx);
         f(s);
@@ -201,6 +201,9 @@ std::vector<EdgeSmall> ExtractEdges(
     // TODO: while-iterator for vector & file with unified interface
     int64_t edge_idx;
     while (streamer.next(edge_idx)) {
+        if (edge_idx > src_chunk->length()) {
+            logger("[ERROR] index out of range: demanded "+std::to_string(edge_idx)+"'s element of user table of length "+std::to_string(src_chunk->length()));
+        }
         auto val_src = src_prop_index_map.find(src_raw[edge_idx]);
         auto val_dst = dst_prop_index_map.find(dst_raw[edge_idx]);
 
@@ -222,11 +225,16 @@ std::vector<EdgeSmall> ExtractEdges(
             edge_idx
         });
     }
+
+    if constexpr (std::is_same_v<Streamer, FileStream>) {
+        clear_file(streamer.get_path());
+    }
+
     return new_chunk_edges;
 }
 
 template <typename ArrowArrayType>
-void CollectRowNumers(const std::shared_ptr<arrow::ChunkedArray>& column,
+void CollectRowNumbers(const std::shared_ptr<arrow::ChunkedArray>& column,
                       arrow::Int64Builder& pk2row,
                       std::unordered_map<int64_t, graphar::IdType>& map) {
 
@@ -303,11 +311,11 @@ void ConstructBuilderLinear(
 
 
 std::string make_mapping_path(std::string user_tmp, int chunk) {
-    return user_tmp + "/chunk_" + std::to_string(chunk) + ".bin";
+    return user_tmp + "/chunk_" + std::to_string(chunk);
 }
 
 /* Designed to write edge_to_chunk_mapping into files.
-*  Files will be stored in user-specified_tmp_path/mapping directory, named 'chunk_k.bin'.
+*  Files will be stored in user-specified_tmp_path/mapping directory, named 'chunk_k'.
 */
 bool WriteMappingNClearVector(std::vector<std::vector<std::vector<int64_t>>>& data,
                               std::string& tmp_path) {
@@ -541,10 +549,10 @@ std::string DoMerge(const py::dict& config_dict)
             // for each PK find the corresponding line number in additional attributes
             switch(vertex_chunk_column->chunk(0)->type_id()) {
                 case arrow::Type::INT32:
-                    CollectRowNumers<arrow::Int32Array>(vertex_chunk_column, builder, pk2row_num);
+                    CollectRowNumbers<arrow::Int32Array>(vertex_chunk_column, builder, pk2row_num);
                     break;
                 case arrow::Type::INT64:
-                    CollectRowNumers<arrow::Int64Array>(vertex_chunk_column, builder, pk2row_num);
+                    CollectRowNumbers<arrow::Int64Array>(vertex_chunk_column, builder, pk2row_num);
                     break;
                 default:
                     throw std::runtime_error("Unsupported type of PK in provided GraphAr data.");
@@ -910,7 +918,10 @@ std::string DoMerge(const py::dict& config_dict)
                 bool wrote_tmp_files = false;
                 if(merge_config.tmp_path != "") {
                     wrote_tmp_files = WriteMappingNClearVector(edge_to_chunk_mapping, merge_config.tmp_path);
-                    logger("    Wrote mapping to '"+merge_config.tmp_path+"'.");
+                    if (wrote_tmp_files)
+                        logger("    Wrote mapping to '"+merge_config.tmp_path+"'.");
+                    else
+                        logger("    [ERROR] Could not write mapping to '"+merge_config.tmp_path+"'. Using in-memory vector.");
                 }
 
                 // Edges are sorted by their chunks, we only need to:
