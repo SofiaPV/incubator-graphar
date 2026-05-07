@@ -318,17 +318,27 @@ std::string make_mapping_path(std::string user_tmp, int chunk) {
 *  Files will be stored in user-specified_tmp_path/mapping directory, named 'chunk_k'.
 */
 bool WriteMappingNClearVector(std::vector<std::vector<std::vector<int64_t>>>& data,
-                              std::string& tmp_path) {
+                              std::string& tmp_path, int num_threads = 1) {
     bool is_ok = true;
+    int num_of_chunks = data[0].size();
 
-    for(int chunk = 0; chunk < data[0].size() && is_ok; ++chunk) {
+    #pragma omp parallel for schedule(dynamic) num_threads(num_threads)
+    for(int chunk = 0; chunk < num_of_chunks; ++chunk) {
+
+        #pragma omp cancellation point for
+        if (!is_ok) continue; 
+
         std::string path_to_chunk = tmp_path + "/chunk_" + std::to_string(chunk); 
         for(int t = 0; t < data.size(); ++t) {
             try {
                 append_to_bin(data[t][chunk], path_to_chunk);
             } catch (const std::exception& e) {
                 std::cout << "[ERROR] append_to_bin failed: " << e.what() << "\n";
-                is_ok = false;
+                #pragma omp critical
+                {
+                    is_ok = false;
+                }
+                #pragma omp cancel for
                 break;
             }
         }
@@ -917,7 +927,7 @@ std::string DoMerge(const py::dict& config_dict)
                 // if tmp_path exists, write down chunks as chunk_i.bin; clear edge_to_chunk_mapping
                 bool wrote_tmp_files = false;
                 if(merge_config.tmp_path != "") {
-                    wrote_tmp_files = WriteMappingNClearVector(edge_to_chunk_mapping, merge_config.tmp_path);
+                    wrote_tmp_files = WriteMappingNClearVector(edge_to_chunk_mapping, merge_config.tmp_path, num_threads);
                     if (wrote_tmp_files)
                         logger("    Wrote mapping to '"+merge_config.tmp_path+"'.");
                     else
