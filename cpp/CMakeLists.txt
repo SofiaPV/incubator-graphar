@@ -32,7 +32,7 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
 endif()
 
 set(GRAPHAR_MAJOR_VERSION 0)
-set(GRAPHAR_MINOR_VERSION 12)
+set(GRAPHAR_MINOR_VERSION 13)
 set(GRAPHAR_PATCH_VERSION 0)
 set(GRAPHAR_VERSION ${GRAPHAR_MAJOR_VERSION}.${GRAPHAR_MINOR_VERSION}.${GRAPHAR_PATCH_VERSION})
 project(graphar-cpp LANGUAGES C CXX VERSION ${GRAPHAR_VERSION})
@@ -415,9 +415,6 @@ else()
         message(FATAL_ERROR "parquet is required, please install it and retry")
     endif()
 
-    find_package(Protobuf REQUIRED)
-    include_directories(${PROTOBUF_INCLUDE_DIRS})
-
     build_graphar()
 endif()
 
@@ -566,6 +563,7 @@ if (BUILD_TESTS)
     add_test(test_arrow_chunk_reader SRCS test/test_arrow_chunk_reader.cc)
     add_test(test_graph SRCS test/test_graph.cc)
     add_test(test_multi_label SRCS test/test_multi_label.cc)
+    add_test(test_multi_property SRCS test/test_multi_property.cc)
 
     # enable_testing()
 endif()

@@ -25,7 +25,6 @@
 #include <memory>
 #include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include "graphar/arrow/chunk_reader.h"
@@ -236,7 +235,8 @@ class VertexIter {
     if (is_filtered_) {
       for (auto& reader : readers_) {
         reader.seek(filtered_ids_[cur_offset_]);
-        GAR_ASSIGN_OR_RAISE(auto chunk_table, reader.GetChunk());
+        GAR_ASSIGN_OR_RAISE(auto chunk_table,
+                            reader.GetChunk(graphar::GetChunkVersion::V1));
         column = util::GetArrowColumnByName(chunk_table, property);
         if (column != nullptr) {
           break;
@@ -245,7 +245,8 @@ class VertexIter {
     } else {
       for (auto& reader : readers_) {
         reader.seek(cur_offset_);
-        GAR_ASSIGN_OR_RAISE(auto chunk_table, reader.GetChunk());
+        GAR_ASSIGN_OR_RAISE(auto chunk_table,
+                            reader.GetChunk(graphar::GetChunkVersion::V1));
         column = util::GetArrowColumnByName(chunk_table, property);
         if (column != nullptr) {
           break;
@@ -329,12 +330,12 @@ class VerticesCollection {
   explicit VerticesCollection(const std::shared_ptr<VertexInfo>& vertex_info,
                               const std::string& prefix,
                               const bool is_filtered = false,
-                              const std::vector<IdType> filtered_ids = {})
-      : vertex_info_(std::move(vertex_info)),
+                              std::vector<IdType> filtered_ids = {})
+      : vertex_info_(vertex_info),
         prefix_(prefix),
         labels_(vertex_info->GetLabels()),
         is_filtered_(is_filtered),
-        filtered_ids_(filtered_ids) {
+        filtered_ids_(std::move(filtered_ids)) {
     // get the vertex num
     std::string base_dir;
     GAR_ASSIGN_OR_RAISE_ERROR(auto fs,
@@ -376,14 +377,15 @@ class VerticesCollection {
 
   /** The vertex id list that satisfies the label filter condition. */
   Result<std::vector<IdType>> filter(
-      std::vector<std::string> filter_labels,
+      const std::vector<std::string>& filter_labels,
       std::vector<IdType>* new_valid_chunk = nullptr);
 
   Result<std::vector<IdType>> filter_by_acero(
-      std::vector<std::string> filter_labels) const;
+      const std::vector<std::string>& filter_labels) const;
 
   Result<std::vector<IdType>> filter(
-      std::string property_name, std::shared_ptr<Expression> filter_expression,
+      const std::string& property_name,
+      std::shared_ptr<Expression> filter_expression,
       std::vector<IdType>* new_valid_chunk = nullptr);
 
   /**
@@ -608,6 +610,11 @@ class EdgeIter {
       GAR_ASSIGN_OR_RAISE_ERROR(num_row_of_chunk_,
                                 adj_list_reader_.GetRowNumOfChunk());
       ++global_chunk_index_;
+      // The reader also need to be updated at the boundaries of chunks of size
+      // chunk_size.
+      for (auto& reader : property_readers_) {
+        reader.next_chunk();
+      }
     }
     if (st.IsKeyError()) {
       st = adj_list_reader_.next_chunk();
@@ -899,9 +906,7 @@ class EdgesCollection {
   explicit EdgesCollection(const std::shared_ptr<EdgeInfo>& edge_info,
                            const std::string& prefix, IdType vertex_chunk_begin,
                            IdType vertex_chunk_end, AdjListType adj_list_type)
-      : edge_info_(std::move(edge_info)),
-        prefix_(prefix),
-        adj_list_type_(adj_list_type) {
+      : edge_info_(edge_info), prefix_(prefix), adj_list_type_(adj_list_type) {
     GAR_ASSIGN_OR_RAISE_ERROR(
         auto vertex_chunk_num,
         util::GetVertexChunkNum(prefix_, edge_info_, adj_list_type_));

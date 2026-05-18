@@ -72,8 +72,13 @@ class FileSystem;
 using IdType = int64_t;
 enum class Type;
 class DataType;
+/** Defines how multiple values are handled for a given property key */
+enum Cardinality { SINGLE, LIST, SET };
 /** Type of file format */
 enum FileType { CSV = 0, PARQUET = 1, ORC = 2, JSON = 3 };
+enum SelectType { PROPERTIES = 0, LABELS = 1 };
+/** GetChunkVersion: V1 use scanner, V2 use FileReader */
+enum GetChunkVersion { AUTO = 0, V1 = 1, V2 = 2 };
 enum class AdjListType : uint8_t;
 
 template <typename T>
@@ -126,6 +131,7 @@ std::shared_ptr<AdjacentList> CreateAdjacentList(
  * @param type The type of the vertex
  * @param chunk_size The number of vertices in each vertex chunk
  * @param property_groups The property group vector of the vertex
+ * @param labels The labels of the vertex.
  * @param prefix The prefix of the vertex info. If left empty, the default
  *        prefix will be set to the type of the vertex
  * @param version The format version of the vertex info

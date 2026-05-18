@@ -221,5 +221,140 @@ TEST_CASE_METHOD(GlobalFixture, "Graph") {
     auto last_invalid_vertex = *(vertices->end() + -1);
     REQUIRE(last_invalid_vertex.property<int64_t>(property).has_error());
   }
+
+  SECTION("EdgeIterator") {
+    std::string src_type = "person", edge_type = "knows", dst_type = "person";
+    auto expect =
+        EdgesCollection::Make(graph_info, src_type, edge_type, dst_type,
+                              AdjListType::ordered_by_source);
+    REQUIRE(!expect.has_error());
+    auto edges = expect.value();
+
+    // Test iterator functionality
+    auto begin = edges->begin();
+    auto end = edges->end();
+    size_t count = 0;
+
+    // Iterate through first 2000 edges
+    for (auto it = begin; it != end; ++it) {
+      if (count >= 2000) {
+        break;
+      }
+      count++;
+      REQUIRE(it.source() >= 0);
+      REQUIRE(it.destination() >= 0);
+      REQUIRE(it.property<std::string>("creationDate").has_value());
+    }
+    REQUIRE(count == 2000);
+
+    // Test skipping and iterating next 2000 edges
+    auto begin2 = edges->begin();
+    size_t i = 0;
+    for (auto it = begin2; it != end; ++it, i++) {
+      if (i < 2000) {
+        continue;
+      }
+      if (i >= 4000) {
+        break;
+      }
+      count++;
+      REQUIRE(it.source() >= 0);
+      REQUIRE(it.destination() >= 0);
+      REQUIRE(it.property<std::string>("creationDate").has_value());
+    }
+    REQUIRE(count == 4000);
+
+    // Test skipping and iterating next 2000 edges
+    auto begin3 = edges->begin();
+    size_t j = 0;
+    for (auto it = begin3; it != end; ++it, j++) {
+      if (j < 4000) {
+        continue;
+      }
+      if (j >= 6000) {
+        break;
+      }
+      count++;
+      REQUIRE(it.source() >= 0);
+      REQUIRE(it.destination() >= 0);
+      REQUIRE(it.property<std::string>("creationDate").has_value());
+    }
+    REQUIRE(count == 6000);
+
+    // Test iterating remaining edges
+    auto begin4 = edges->begin();
+    size_t k = 0;
+    for (auto it = begin4; it != end; ++it, k++) {
+      if (k < 6000) {
+        continue;
+      }
+      count++;
+      REQUIRE(it.source() >= 0);
+      REQUIRE(it.destination() >= 0);
+      REQUIRE(it.property<std::string>("creationDate").has_value());
+    }
+
+    // Verify total count matches collection size
+    REQUIRE(count == edges->size());
+    std::cout << "Total edge_count=" << count << std::endl;
+  }
+
+  SECTION("DateType") {
+    std::string path_date =
+        test_data_dir + "/ldbc_sample/parquet/ldbc_sample_date.graph.yml";
+    auto maybe_graph_info_date = GraphInfo::Load(path_date);
+    REQUIRE(maybe_graph_info_date.status().ok());
+    auto graph_info_date = maybe_graph_info_date.value();
+    std::string src_type = "person", edge_type = "knows-date",
+                dst_type = "person";
+    auto expect =
+        EdgesCollection::Make(graph_info_date, src_type, edge_type, dst_type,
+                              AdjListType::ordered_by_source);
+    REQUIRE(!expect.has_error());
+    auto edges = expect.value();
+
+    // Expected values for the first ten creationDate-date entries
+    int32_t expected_dates[10] = {14820, 15442, 14909, 15182, 15141,
+                                  15058, 15155, 15135, 15364, 15455};
+    size_t count = 0;
+    for (auto it = edges->begin(); it != edges->end() && count < 10;
+         ++it, ++count) {
+      auto date_val = it.property<int32_t>("creationDate-date");
+      REQUIRE(date_val.has_value());
+      REQUIRE(date_val.value() == expected_dates[count]);
+    }
+    REQUIRE(count == 10);
+    std::cout << "DateType edge_count=" << count << std::endl;
+  }
+
+  SECTION("TimestampType") {
+    std::string path_timestamp =
+        test_data_dir + "/ldbc_sample/parquet/ldbc_sample_timestamp.graph.yml";
+    auto maybe_graph_info_timestamp = GraphInfo::Load(path_timestamp);
+    REQUIRE(maybe_graph_info_timestamp.status().ok());
+    auto graph_info_timestamp = maybe_graph_info_timestamp.value();
+    std::string src_type = "person", edge_type = "knows-timestamp",
+                dst_type = "person";
+    auto expect =
+        EdgesCollection::Make(graph_info_timestamp, src_type, edge_type,
+                              dst_type, AdjListType::ordered_by_source);
+    REQUIRE(!expect.has_error());
+    auto edges = expect.value();
+
+    // Expected values for the first ten creationDate-timestamp entries
+    int64_t expected_timestamps[10] = {
+        1280503193298LL, 1334239018931LL, 1288146786288LL, 1311781394869LL,
+        1308223719623LL, 1301064563134LL, 1309416320777LL, 1307728039432LL,
+        1327492287348LL, 1335389465259LL};
+    size_t count = 0;
+    for (auto it = edges->begin(); it != edges->end() && count < 10;
+         ++it, ++count) {
+      auto ts_val = it.property<int64_t>("creationDate-timestamp");
+      REQUIRE(ts_val.has_value());
+      REQUIRE(ts_val.value() == expected_timestamps[count]);
+    }
+    REQUIRE(count == 10);
+    std::cout << "TimestampType edge_count=" << count << std::endl;
+  }
 }
 }  // namespace graphar

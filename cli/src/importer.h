@@ -107,7 +107,7 @@ void ProcessArray(
 
         int64_t edge_src = static_cast<int64_t>(src_data[i]);
         auto src_key = std::make_pair(edge.src_type, edge.src_prop);
-        auto& src_map = vertex_prop_index_map[src_key];
+        auto& src_map = vertex_prop_index_map.at(src_key);
         auto val_src = src_map.find(edge_src);
         if (val_src == src_map.end())
         {
@@ -123,7 +123,7 @@ void ProcessArray(
 
         int64_t edge_dst = static_cast<int64_t>(dst_data[i]);
         auto dst_key = std::make_pair(edge.dst_type, edge.dst_prop);
-        auto& dst_map = vertex_prop_index_map[dst_key];
+        auto& dst_map = vertex_prop_index_map.at(dst_key);
         auto val_dst = dst_map.find(edge_dst);
         if (val_dst == dst_map.end())
         {
@@ -545,7 +545,7 @@ std::string DoImport(const py::dict& config_dict) {
             PreProcessArray<arrow::Int32Array>(
                 array, edge_to_chunk_mapping,
                 vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)), 
-                num_threads, edge_info->GetDstChunkSize());
+                num_threads, edge_info->GetSrcChunkSize());
         }
         else {
             throw std::runtime_error("Unsupported type");
@@ -559,7 +559,7 @@ std::string DoImport(const py::dict& config_dict) {
             PreProcessArray<arrow::Int64Array>(
                 array, edge_to_chunk_mapping,
                 vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), 
-                num_threads, edge_info->GetSrcChunkSize());
+                num_threads, edge_info->GetDstChunkSize());
         }
         else if (dst_prop_type == arrow::Type::INT32) {
             PreProcessArray<arrow::Int32Array>(

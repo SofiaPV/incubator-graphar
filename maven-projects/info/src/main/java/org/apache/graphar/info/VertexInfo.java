@@ -19,121 +19,144 @@
 
 package org.apache.graphar.info;
 
+import java.io.Writer;
+import java.net.URI;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.stream.Collectors;
+import java.util.Set;
+import org.apache.graphar.info.type.DataType;
 import org.apache.graphar.info.yaml.GraphYaml;
 import org.apache.graphar.info.yaml.VertexYaml;
-import org.apache.graphar.proto.DataType;
 import org.yaml.snakeyaml.Yaml;
 
 public class VertexInfo {
-    private final org.apache.graphar.proto.VertexInfo protoVertexInfo;
-    private final PropertyGroups cachedPropertyGroups;
+    private final String type;
+    private final long chunkSize;
+    private final PropertyGroups propertyGroups;
+    private final URI baseUri;
+    private final VersionInfo version;
 
     public VertexInfo(
-            String type, long chunkSize, List<PropertyGroup> propertyGroups, String prefix) {
-        this.cachedPropertyGroups = new PropertyGroups(propertyGroups);
-        this.protoVertexInfo =
-                org.apache.graphar.proto.VertexInfo.newBuilder()
-                        .setType(type)
-                        .setChunkSize(chunkSize)
-                        .addAllProperties(
-                                propertyGroups.stream()
-                                        .map(PropertyGroup::getProto)
-                                        .collect(Collectors.toList()))
-                        .setPrefix(prefix)
-                        .build();
+            String type,
+            long chunkSize,
+            List<PropertyGroup> propertyGroups,
+            String prefix,
+            String version) {
+        this(type, chunkSize, propertyGroups, URI.create(prefix), version);
     }
 
-    private VertexInfo(org.apache.graphar.proto.VertexInfo protoVertexInfo) {
-        this.protoVertexInfo = protoVertexInfo;
-        this.cachedPropertyGroups = PropertyGroups.ofProto(protoVertexInfo.getPropertiesList());
+    public VertexInfo(
+            String type,
+            long chunkSize,
+            List<PropertyGroup> propertyGroups,
+            URI baseUri,
+            String version) {
+        this(type, chunkSize, propertyGroups, baseUri, VersionParser.getVersion(version));
     }
 
-    public static VertexInfo ofProto(org.apache.graphar.proto.VertexInfo protoVertexInfo) {
-        return new VertexInfo(protoVertexInfo);
-    }
-
-    org.apache.graphar.proto.VertexInfo getProto() {
-        return protoVertexInfo;
+    public VertexInfo(
+            String type,
+            long chunkSize,
+            List<PropertyGroup> propertyGroups,
+            URI baseUri,
+            VersionInfo version) {
+        if (chunkSize < 0) {
+            throw new IllegalArgumentException("Chunk size cannot be negative: " + chunkSize);
+        }
+        this.type = type;
+        this.chunkSize = chunkSize;
+        this.propertyGroups = new PropertyGroups(propertyGroups);
+        this.baseUri = baseUri;
+        this.version = version;
     }
 
     public Optional<VertexInfo> addPropertyGroupAsNew(PropertyGroup propertyGroup) {
-        // do not need check property group exist, because PropertyGroups will check it
-        return cachedPropertyGroups
+        return propertyGroups
                 .addPropertyGroupAsNew(propertyGroup)
+                .map(PropertyGroups::getPropertyGroupList)
                 .map(
                         newPropertyGroups ->
                                 new VertexInfo(
-                                        protoVertexInfo.getType(),
-                                        protoVertexInfo.getChunkSize(),
-                                        newPropertyGroups.getPropertyGroupList(),
-                                        protoVertexInfo.getPrefix()));
+                                        type, chunkSize, newPropertyGroups, baseUri, version));
     }
 
-    public int propertyGroupNum() {
-        return cachedPropertyGroups.getPropertyGroupNum();
+    public int getPropertyGroupNum() {
+        return propertyGroups.getPropertyGroupNum();
     }
 
     public DataType getPropertyType(String propertyName) {
-        return cachedPropertyGroups.getPropertyType(propertyName);
+        return propertyGroups.getPropertyType(propertyName);
     }
 
     public boolean hasProperty(String propertyName) {
-        return cachedPropertyGroups.hasProperty(propertyName);
+        return propertyGroups.hasProperty(propertyName);
     }
 
     public boolean isPrimaryKey(String propertyName) {
-        return cachedPropertyGroups.isPrimaryKey(propertyName);
+        return propertyGroups.isPrimaryKey(propertyName);
     }
 
     public boolean isNullableKey(String propertyName) {
-        return cachedPropertyGroups.isNullableKey(propertyName);
+        return propertyGroups.isNullableKey(propertyName);
     }
 
     public boolean hasPropertyGroup(PropertyGroup propertyGroup) {
-        return cachedPropertyGroups.hasPropertyGroup(propertyGroup);
+        return propertyGroups.hasPropertyGroup(propertyGroup);
     }
 
-    public String getPropertyGroupPrefix(PropertyGroup propertyGroup) {
+    public PropertyGroup getPropertyGroup(String property) {
+        return propertyGroups.getPropertyGroup(property);
+    }
+
+    public URI getPropertyGroupUri(PropertyGroup propertyGroup) {
         checkPropertyGroupExist(propertyGroup);
-        return getPrefix() + "/" + propertyGroup.getPrefix();
+        return getBaseUri().resolve(propertyGroup.getBaseUri());
     }
 
-    public String getPropertyGroupChunkPath(PropertyGroup propertyGroup, long chunkIndex) {
+    public URI getPropertyGroupChunkUri(PropertyGroup propertyGroup, long chunkIndex) {
         // PropertyGroup will be checked in getPropertyGroupPrefix
-        return getPropertyGroupPrefix(propertyGroup) + "/chunk" + chunkIndex;
+        return getPropertyGroupUri(propertyGroup).resolve("chunk" + chunkIndex);
     }
 
-    public String getVerticesNumFilePath() {
-        return getPrefix() + "/vertex_count";
+    public URI getVerticesNumFileUri() {
+        return getBaseUri().resolve("vertex_count");
+    }
+
+    public void dump(Writer output) {
+        Yaml yaml = new Yaml(GraphYaml.getRepresenter(), GraphYaml.getDumperOptions());
+        VertexYaml vertexYaml = new VertexYaml(this);
+        yaml.dump(vertexYaml, output);
     }
 
     public String dump() {
-        Yaml yaml = new Yaml(GraphYaml.getDumperOptions());
+        Yaml yaml = new Yaml(GraphYaml.getRepresenter(), GraphYaml.getDumperOptions());
         VertexYaml vertexYaml = new VertexYaml(this);
         return yaml.dump(vertexYaml);
     }
 
     public String getType() {
-        return protoVertexInfo.getType();
+        return type;
     }
 
     public long getChunkSize() {
-        return protoVertexInfo.getChunkSize();
+        return chunkSize;
     }
 
     public List<PropertyGroup> getPropertyGroups() {
-        return cachedPropertyGroups.getPropertyGroupList();
+        return propertyGroups.getPropertyGroupList();
     }
 
     public String getPrefix() {
-        return protoVertexInfo.getPrefix();
+        return baseUri == null ? null : baseUri.toString();
     }
 
-    public String getVertexPath() {
-        return getPrefix() + "/" + getType() + ".vertex.yaml";
+    public URI getBaseUri() {
+        return baseUri;
+    }
+
+    public VersionInfo getVersion() {
+        return version;
     }
 
     private void checkPropertyGroupExist(PropertyGroup propertyGroup) {
@@ -147,5 +170,28 @@ public class VertexInfo {
                             + " does not exist in the vertex "
                             + getType());
         }
+    }
+
+    public boolean isValidated() {
+        // Check if type and baseUri is not empty and chunkSize is positive
+        if (type == null || type.isEmpty() || chunkSize <= 0 || baseUri == null) {
+            return false;
+        }
+        // Check if property groups are valid
+        Set<String> propertyNameSet = new HashSet<>();
+        for (PropertyGroup pg : propertyGroups.getPropertyGroupList()) {
+            // Check if property group is not null and not empty
+            if (pg == null || !pg.isValidated()) {
+                return false;
+            }
+            for (Property p : pg.getPropertyList()) {
+                if (propertyNameSet.contains(p.getName())) {
+                    return false;
+                }
+                propertyNameSet.add(p.getName());
+            }
+        }
+
+        return true;
     }
 }

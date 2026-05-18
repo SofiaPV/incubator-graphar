@@ -53,6 +53,12 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 # Принудительно используем статическую версию libgomp
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++ -lgomp -lpthread")
 
+# Check if ORC is enabled.
+if (NOT ${ARROW_ORC})
+    message(WARNING "apache-arrow is built without ORC extension, ORC related functionalities will be disabled.")
+else()
+    add_definitions(-DARROW_ORC) # Add macro, otherwise inconsistent in build phase on ubuntu.
+endif()
 # Add a library using FindPython's tooling (pybind11 also provides a helper like
 # this)
 python_add_library(_core MODULE src/main.cc WITH_SOABI)
