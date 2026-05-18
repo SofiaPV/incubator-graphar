@@ -194,14 +194,8 @@ def merge_data(
         raise typer.Exit(1) from None
     try:
         logger.info("Starting merge")
-<<<<<<< HEAD
-        res = do_merge(merge_config.model_dump()) # TODO: make my C++ code
+        res = do_merge(merge_config.model_dump()) 
         logger.info(res)
-=======
-        raise NotImplementedError("Merge not implemented yet.")
-        #res = do_merge(merge_config.model_dump()) # TODO: make my C++ code
-        #logger.info(res)
->>>>>>> lithium-graphar
     except Exception as e:
         logger.error("Merge failed: %s", e)
         raise typer.Exit(1) from None

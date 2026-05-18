@@ -855,6 +855,7 @@ std::string DoMerge(const py::dict& config_dict)
 
                 // create writer for this edge & adj list type
                 graphar::EdgeChunkWriter edge_writer(updated_edge_info, save_path.string()+"/", adj_lst->GetType(), 
+                                                     graphar::WriterOptions::DefaultWriterOption(),
                                                      StringToValidateLevel(edge.validate_level));
                 
                 // calculate number of chunks according to the number of src/dst vertices

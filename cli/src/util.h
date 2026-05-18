@@ -100,17 +100,6 @@ std::shared_ptr<arrow::Table> SelectColumns(
 std::shared_ptr<arrow::Table> GetDataFromParquetFile(
     const std::string& path, const std::vector<std::string>& column_names) {
   // Open the Parquet file
-<<<<<<< HEAD
-  auto infile =
-      arrow::io::ReadableFile::Open(path, arrow::default_memory_pool())
-          .ValueOrDie();
-
-  auto result = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
-  if (!result.ok()) {
-      throw std::runtime_error(
-          "Failed to create Parquet FileReader: " +
-          result.status().ToString());
-=======
   // Create a Parquet FileReader
   std::unique_ptr<parquet::arrow::FileReader> parquet_reader;
   auto status = graphar::util::OpenParquetArrowReader(
@@ -118,13 +107,11 @@ std::shared_ptr<arrow::Table> GetDataFromParquetFile(
   if (!status.ok()) {
     throw std::runtime_error("Failed to create Parquet FileReader: " +
                              status.ToString());
->>>>>>> lithium-graphar
   }
-  std::unique_ptr<parquet::arrow::FileReader> parquet_reader = std::move(result).ValueOrDie();
 
   // Retrieve the Arrow schema from the Parquet file
   std::shared_ptr<arrow::Schema> schema;
-  auto status = parquet_reader->GetSchema(&schema);
+  status = parquet_reader->GetSchema(&schema);
   if (!status.ok()) {
     throw std::runtime_error("Failed to retrieve schema from Parquet file: " +
                              status.ToString());
@@ -286,11 +273,7 @@ std::shared_ptr<arrow::Table> GetDataFromJsonFile(
   return table;
 }
 
-<<<<<<< HEAD
 /*arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> OpenParquetAsBatch(
-=======
-arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> OpenParquetAsBatch(
->>>>>>> lithium-graphar
     const std::string& path, const std::vector<std::string>& column_names) {
 
   ARROW_ASSIGN_OR_RAISE(auto input, arrow::io::ReadableFile::Open(path));
@@ -341,11 +324,7 @@ std::shared_ptr<arrow::RecordBatchReader> GetDataAsBatch(
       // TODO: add csv, orc, json, any imprtant format
       throw std::runtime_error("Unsupported file type: " + file_type);
     }
-<<<<<<< HEAD
 }*/
-=======
-}
->>>>>>> lithium-graphar
 
 std::shared_ptr<arrow::Table> GetDataFromFile(
     const std::string& path, const std::vector<std::string>& column_names,

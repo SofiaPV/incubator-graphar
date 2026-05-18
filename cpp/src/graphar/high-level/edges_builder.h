@@ -376,19 +376,6 @@ class EdgesBuilder {
     return Status::OK();
   }
 
-  Status Reserve(const int64_t &reserve_count) {
-    edges_.resize(reserve_count);
-    return Status::OK();
-  }
-
-  Status PreReserve(const std::vector<int64_t> &reserve_count) {
-    edges_.resize(reserve_count.size());
-    for (int64_t i = 0; i < reserve_count.size(); i++) {
-      edges_[i].reserve(reserve_count[i]);
-    }
-    return Status::OK();
-  }
-
   /**
    * @brief Get the current number of edges in the collection.
    *
@@ -526,38 +513,6 @@ class EdgesBuilder {
   {
     auto it = column_names_.find(column_name);
     return it == column_names_.end() ? nullptr : &*it;
-  }
-
-  /**
-   * @brief add column name to the set of column names, so we can have std::string_view of it instead of copy
-   * 
-   * @param column_name The name of the column
-   */
-  void AddColumnName(const std::string& column_name)
-  {
-    column_names_.insert(column_name);
-  }
-
-  /**
-   * @brief given a column name, return a string_view on it
-   * 
-   * @param column_name the name of the column
-   */
-  std::string_view GetColumnName(const std::string& column_name)
-  {
-      if (column_names_.find(column_name) == column_names_.end())  // if we do not have this name, we should add it
-      {
-          AddColumnName(column_name);
-      }
-      return std::string_view{*column_names_.find(column_name)};
-  }
-
-  const std::string& GetColumnName(std::string_view column_name) const
-  {
-      auto it = column_names_.find(column_name);
-      if (it == column_names_.end())
-        return nullptr;
-      return *it;
   }
 
  private:
