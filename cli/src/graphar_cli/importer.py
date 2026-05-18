@@ -127,7 +127,7 @@ def validate(import_config: ImportConfig):
             raise ValueError(msg)
         if edge.dst_edge_prop not in source_values:
             msg = (
-                f"Destination edge property '{edge.src_edge_prop}' "
+                f"Destination edge property '{edge.dst_edge_prop}' "
                 f"not found in edge '{edge.edge_type}'"
             )
             raise ValueError(msg)

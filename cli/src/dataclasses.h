@@ -122,10 +122,13 @@ struct AbstractConfig {
 
 struct MergeConfig: public AbstractConfig {
   MergeSchema merge_schema;
+  std::string tmp_path;
+
   virtual void fill(const py::dict& config_dict) override {
     // graph description
     auto graphar_dict = config_dict["graphar"].cast<py::dict>();
     graphar_config.fill(graphar_dict);
+    tmp_path = graphar_dict["tmp_path"].cast<std::string>();
 
     // vertices + edges 
     auto schema_dict = config_dict["merge_schema"].cast<py::dict>();

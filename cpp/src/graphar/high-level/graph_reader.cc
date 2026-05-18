@@ -81,7 +81,8 @@ Vertex::Vertex(IdType id,
     : id_(id) {
   // get the first row of table
   for (auto& reader : readers) {
-    GAR_ASSIGN_OR_RAISE_ERROR(auto chunk_table, reader.GetChunk());
+    GAR_ASSIGN_OR_RAISE_ERROR(auto chunk_table,
+                              reader.GetChunk(graphar::GetChunkVersion::V1));
     auto schema = chunk_table->schema();
     for (int i = 0; i < schema->num_fields(); ++i) {
       auto field = chunk_table->field(i);
@@ -149,7 +150,7 @@ static inline bool IsValid(bool* state, int column_number) {
 }
 
 Result<std::vector<IdType>> VerticesCollection::filter(
-    std::vector<std::string> filter_labels,
+    const std::vector<std::string>& filter_labels,
     std::vector<IdType>* new_valid_chunk) {
   std::vector<int> indices;
   const int TOT_ROWS_NUM = vertex_num_;
@@ -213,7 +214,7 @@ Result<std::vector<IdType>> VerticesCollection::filter(
 }
 
 Result<std::vector<IdType>> VerticesCollection::filter_by_acero(
-    std::vector<std::string> filter_labels) const {
+    const std::vector<std::string>& filter_labels) const {
   std::vector<int> indices;
   const int TOT_ROWS_NUM = vertex_num_;
   const int CHUNK_SIZE = vertex_info_->GetChunkSize();
@@ -264,7 +265,8 @@ Result<std::vector<IdType>> VerticesCollection::filter_by_acero(
 }
 
 Result<std::vector<IdType>> VerticesCollection::filter(
-    std::string property_name, std::shared_ptr<Expression> filter_expression,
+    const std::string& property_name,
+    std::shared_ptr<Expression> filter_expression,
     std::vector<IdType>* new_valid_chunk) {
   std::vector<int> indices;
   const int TOT_ROWS_NUM = vertex_num_;
@@ -280,7 +282,8 @@ Result<std::vector<IdType>> VerticesCollection::filter(
     for (int chunk_idx : valid_chunk_) {
       // how to itetate valid_chunk_?
       filter_reader->seek(chunk_idx * CHUNK_SIZE);
-      auto filter_result = filter_reader->GetChunk();
+      auto filter_result =
+          filter_reader->GetChunk(graphar::GetChunkVersion::V1);
       auto filter_table = filter_result.value();
       int count = filter_table->num_rows();
       if (count != 0 && new_valid_chunk != nullptr) {
@@ -301,7 +304,8 @@ Result<std::vector<IdType>> VerticesCollection::filter(
   } else {
     for (int chunk_idx = 0; chunk_idx * CHUNK_SIZE < TOT_ROWS_NUM;
          ++chunk_idx) {
-      auto filter_result = filter_reader->GetChunk();
+      auto filter_result =
+          filter_reader->GetChunk(graphar::GetChunkVersion::V1);
       auto filter_table = filter_result.value();
       int count = filter_table->num_rows();
       filter_reader->next_chunk();

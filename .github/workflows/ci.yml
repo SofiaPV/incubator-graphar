@@ -39,8 +39,9 @@ concurrency:
 
 jobs:
   ubuntu:
+    # TODO use ubuntu-latest
     name: Ubuntu 22.04 C++
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: ${{ !contains(github.event.pull_request.title, 'WIP') && !github.event.pull_request.draft }}
     env:
       GAR_TEST_DATA: ${{ github.workspace }}/graphar-testing/
@@ -147,24 +148,27 @@ jobs:
       run: |
         export ASAN_OPTIONS=detect_leaks=0
         ctest --output-on-failure
-      
-    - name: Generate coverage info
-      working-directory: "cpp/build"
-      run: |
-        lcov --capture --directory . --output-file coverage.info
-        lcov --remove coverage.info '/usr/*' --output-file coverage.info
-        lcov --list coverage.info
 
-    - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v4.0.1
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-    
     - name: Benchmark
       working-directory: "cpp/build"
       run: |
         ./graph_info_benchmark
         ./arrow_chunk_reader_benchmark
+        ./label_filter_benchmark
+
+    - name: Generate coverage info
+      working-directory: "cpp/build"
+      run: |
+        lcov --capture --directory . --output-file coverage.info
+        lcov --extract coverage.info '*/src/graphar/*' --output-file coverage.info
+        lcov --remove coverage.info '/usr/*' --output-file coverage.info
+        lcov --list coverage.info
+
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        flags: cpp
+        token: ${{ secrets.CODECOV_TOKEN }}
 
     - name: Use Static Arrow
       working-directory: "cpp"
@@ -182,7 +186,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ubuntu-libgraphar.a
-        path: cpp/build-static/libgraphar.a  
+        path: cpp/build-static/libgraphar.a
 
   macos:
     name: ${{ matrix.architecture }} macOS ${{ matrix.macos-version }} C++
@@ -207,7 +211,7 @@ jobs:
       run: |
         brew bundle --file=cpp/Brewfile
         git clone https://github.com/apache/incubator-graphar-testing.git $GAR_TEST_DATA --depth 1
-    
+
     - name: Build GraphAr
       working-directory: "cpp"
       run: |
@@ -240,4 +244,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: macos-${{ matrix.macos-version }}-libgraphar.a
-        path: cpp/build-static/libgraphar.a  
+        path: cpp/build-static/libgraphar.a

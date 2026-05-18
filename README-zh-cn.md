@@ -112,6 +112,87 @@ width="650" alt="edge logical table1" />
 <img src="docs/images/edge_physical_table2.png" class="align-center"
 width="650" alt="edge logical table2" />
 
+## 基准测试（Benchmark）
+
+我们的实验在阿里云 r6.6xlarge 实例上进行，该实例配备了 24 核 Intel(R) Xeon(R) Platinum 8269CY CPU（主频 2.50GHz）、192GB 内存，运行 64 位 Ubuntu 20.04 LTS 系统。数据存储在一块容量为 200GB 的 PL0 ESSD 上，最大 I/O 吞吐量为 180MB/s。我们在其他平台和类 S3 存储上的附加测试也得到了相似的结果。
+
+### 数据集
+
+我们使用了来自 [Graph500](https://graph500.org/) 和 [LDBC](https://doi.org/10.1145/2723372.2742786) 的大规模图数据集，包含数亿个顶点。其他实验中涉及的数据集可在论文 [GraphAr: An Efficient Storage Scheme for Graph Data in Data Lakes](https://arxiv.org/abs/2312.09577) 中查阅。
+
+<table>
+    <thead>
+        <tr>
+            <th>Abbr.</th>
+            <th>Graph</th>
+            <th>|V|</th>
+            <th>|E|</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>G8</td>
+            <td>Graph500-28</td>
+            <td>268M</td>
+            <td>4.29B</td>
+        </tr>
+        <tr>
+            <td>G9</td>
+            <td>Graph500-29</td>
+            <td>537M</td>
+            <td>8.59B</td>
+        </tr>
+        <tr>
+            <td>SF30</td>
+            <td>SNB Interactive SF-30</td>
+            <td>99.4M</td>
+            <td>655M</td>
+        </tr>
+        <tr>
+            <td>SF100</td>
+            <td>SNB Interactive SF-100</td>
+            <td>318M</td>
+            <td>2.15B</td>
+        </tr>
+        <tr>
+            <td>SF300</td>
+            <td>SNB Interactive SF-300</td>
+            <td>908M</td>
+            <td>6.29B</td>
+        </tr>
+    </tbody>
+</table>
+
+### 存储效率
+
+<img src="docs/images/benchmark_storage.png" class="align-center" width="700" alt="storage consumption"/>
+
+我们对比了两种基线方法：
+1. **“plain”**：对源节点和目标节点列使用普通编码；
+2. **“plain + offset”**：在 “plain” 方法基础上，对边排序并添加偏移列以标记每个顶点起始边的位置。
+
+结果表明，GraphAr 在存储方面具有显著优势：平均仅需 “plain + offset” 所需存储空间的 **27.3%**，这主要得益于 delta 编码的应用。
+
+### I/O 速度
+
+<img src="docs/images/benchmark_IO_time.png" class="align-center" width="700" alt="I/O time"/>
+
+图 (a) 显示 GraphAr 明显优于基线方法（CSV），平均性能提升达 **4.9 倍**。图 (b) 中，“Imm”（不可变）和 “Mut”（可变）是 GraphScope 的本地内存存储形式。尽管 GraphAr 的查询时间略高于内存存储方式，这是由于固有的 I/O 开销所致，但它仍显著优于先加载再执行查询的方式，在两个变体下分别提升了 **2.4 倍** 和 **2.5 倍**。这表明 GraphAr 是处理低频查询的有效选择。
+
+### 标签过滤（Label Filtering）
+
+<img src="docs/images/benchmark_label_simple_filter.png" class="align-center" width="700" alt="Simple condition filtering"/>
+
+**简单条件下的标签过滤性能**
+
+对于每个图，我们分别将每个标签作为目标标签进行过滤实验。GraphAr 持续优于所有基线方法。平均来看，相比 “string” 方法，性能提升了 **14.8 倍**；相比 “binary (plain)” 方法，性能提升了 **8.9 倍**；相比 “binary (RLE)” 方法，性能提升了 **7.4 倍**。
+
+<img src="docs/images/benchmark_label_complex_filter.png" class="align-center" width="700" alt="Complex condition filtering"/>
+
+**复杂条件下的标签过滤性能**
+
+在每个图中，我们通过 AND 或 OR 组合两个标签作为过滤条件。“基于合并解码”的方法表现最佳，其中 “binary (RLE) + merge” 相比 “binary (RLE)” 方法最高提升了 **60.5 倍**。
+
 ## 开发库
 
 GraphAr 提供了一组用于读取、写入和转换文件的库。目前，以下库已经可用，并计划扩展对其他编程语言的支持。
@@ -124,12 +205,23 @@ GraphAr 提供了一组用于读取、写入和转换文件的库。目前，以
 
 有关 Scala 与 Spark 库的详细信息，请参阅 [GraphAr Spark库](./maven-projects/spark)。
 
+### Java (FFI) 库
+
+
+> [!WARNING]
+> Java (FFI) 库已不再更新，最后版本依赖于 C++ 库 v0.12.0。
+
+GraphAr Java 库是通过绑定到 C++ 库（当前版本为v0.12.0）创建的，使用 [Alibaba-FastFFI](https://github.com/alibaba/fastFFI) 进行实现。有关 Java 库构建的详细信息，请参阅 [GraphAr Java库](./maven-projects/java)。
+
+
 ### Java 库
+> [!NOTE]
+> Java 库正在开发中.
 
-> [!NOTE] 
-> Java 库正在开发中。
-
-GraphAr Java 库是通过绑定到 C++ 库（当前版本为v0.10.0）创建的，使用 [Alibaba-FastFFI](https://github.com/alibaba/fastFFI) 进行实现。有关 Java 库构建的详细信息，请参阅 [GraphAr Java库](./maven-projects/java)。
+java 库将由纯java开发，他将会包括下面的模块：
+- **[Java-Info](./maven-projects/info)**：负责从yaml文件中解析Graphinfo（schema）
+- **Java-io-XXX**：负责从不同存储格式读取图形数据（待实现）
+- **Java-Api-XXX**：为图形操作提供高级API（待实现）
 
 ### Python（PySpark）库
 
@@ -144,7 +236,6 @@ PySpark 库是作为 GraphAr Spark 库的绑定进行开发的。有关 PySpark 
 - 提交 [Github Issue](https://github.com/apache/incubator-graphar/issues) 以报告错误或提出功能请求。
 - 在 [开发者邮件列表](mailto:dev@graphar.apache.org)上讨论（[订阅](mailto:dev-subscribe@graphar.apache.org?subject=(send%20this%20email%20to%20subscribe)) / [取消订阅](mailto:dev-unsubscribe@graphar.apache.org?subject=(send%20this%20email%20to%20unsubscribe)) / [归档](https://lists.apache.org/list.html?dev@graphar.apache.org)）。
 - 在 [GitHub Discussion](https://github.com/apache/graphar/discussions/new?category=q-a) 中提出问题。
-- 加入我们的 [两周一次的社区会议](https://github.com/apache/incubator-graphar/wiki/GraphAr-Community-Meeting)。
 
 ## 开源协议
 
@@ -152,22 +243,19 @@ PySpark 库是作为 GraphAr Spark 库的绑定进行开发的。有关 PySpark 
 
 ## 论文
 
-- Xue Li, Weibin Zeng, Zhibin Wang, Diwen Zhu, Jingbo Xu, Wenyuan Yu,
-  Jingren Zhou. [Enhancing Data Lakes with GraphAr: Efficient Graph Data
-  Management with a Specialized Storage
-  Scheme\[J\]](https://arxiv.org/abs/2312.09577). arXiv preprint
-  arXiv:2312.09577, 2023.
+- Xue Li, Weibin Zeng, Zhibin Wang, Diwen Zhu, Jingbo Xu, Wenyuan Yu, Jingren Zhou. GraphAr: An Efficient Storage Scheme for Graph Data in Data Lakes. PVLDB, 18(3): 530 - 543, 2024.
 
 ```bibtex
-@article{li2023enhancing,
+@article{li2024graphar,
   author = {Xue Li and Weibin Zeng and Zhibin Wang and Diwen Zhu and Jingbo Xu and Wenyuan Yu and Jingren Zhou},
-  title = {Enhancing Data Lakes with GraphAr: Efficient Graph Data Management with a Specialized Storage Scheme},
-  year = {2023},
-  url = {https://doi.org/10.48550/arXiv.2312.09577},
-  doi = {10.48550/ARXIV.2312.09577},
-  eprinttype = {arXiv},
-  eprint = {2312.09577},
-  biburl = {https://dblp.org/rec/journals/corr/abs-2312-09577.bib},
-  bibsource = {dblp computer science bibliography, https://dblp.org}
+  title = {GraphAr: An Efficient Storage Scheme for Graph Data in Data Lakes},
+  journal = {Proceedings of the VLDB Endowment},
+  year = {2024},
+  volume = {18},
+  number = {3},
+  pages = {530--543},
+  publisher = {VLDB Endowment},
 }
 ```
+
+论文的源代码、数据和其他相关文档已在[Research 分支](https://github.com/apache/incubator-graphar/tree/research)中提供。

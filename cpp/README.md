@@ -56,6 +56,7 @@ On macOS, you can use [Homebrew](https://brew.sh) to install the required packag
 ```bash
 brew update && brew bundle --file=cpp/Brewfile
 ```
+
 > [!NOTE]
 > Currently, the Arrow C++ library has [disabled ARROW_ORC](https://github.com/Homebrew/homebrew-core/blob/4588359b7248b07379094de5310ee7ff89afa17e/Formula/a/apache-arrow.rb#L53) in the brew formula, so you need to build and install the Arrow C++ library manually (with `-DARROW_ORC=True`).
 
@@ -66,7 +67,7 @@ repository and navigated to the ``cpp`` subdirectory with:
 
 ```bash
 git clone https://github.com/apache/incubator-graphar.git
-cd graphar/cpp
+cd incubator-graphar/cpp
 ```
 
 Release build:

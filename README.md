@@ -196,6 +196,207 @@ width="650" alt="edge logical table1" />
 <img src="docs/images/edge_physical_table2.png" class="align-center"
 width="650" alt="edge logical table2" />
 
+## Benchmark
+Our experiments are conducted on an Alibaba Cloud r6.6xlarge instance, equipped with a
+24-core Intel(R) Xeon(R) Platinum 8269CY CPU at 2.50GHz and
+192GB RAM, running 64-bit Ubuntu 20.04 LTS. The data is hosted
+on a 200GB PL0 ESSD with a peak I/O throughput of 180MB/s.
+Additional tests on other platforms and S3-like storage yield similar
+results.
+
+### dataset 
+Here we show statistics of datasets with hundreds of millions of vertices from [Graph500](https://graph500.org/) and [LDBC](https://doi.org/10.1145/2723372.2742786). Other datasets involved in the experiment can be found in  [paper](https://arxiv.org/abs/2312.09577).
+
+<table>
+    <thead>
+        <tr>
+            <th>Abbr.</th>
+            <th>Graph</th>
+            <th>|V|</th>
+            <th>|E|</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>G8</td>
+            <td>Graph500-28</td>
+            <td>268M</td>
+            <td>4.29B</td>
+        </tr>
+        <tr>
+            <td>G9</td>
+            <td>Graph500-29</td>
+            <td>537M</td>
+            <td>8.59B</td>
+        </tr>
+        <tr>
+            <td>SF30</td>
+            <td>SNB Interactive SF-30</td>
+            <td>99.4M</td>
+            <td>655M</td>
+        </tr>
+        <tr>
+            <td>SF100</td>
+            <td>SNB Interactive SF-100</td>
+            <td>318M</td>
+            <td>2.15B</td>
+        </tr>
+        <tr>
+            <td>SF300</td>
+            <td>SNB Interactive SF-300</td>
+            <td>908M</td>
+            <td>6.29B</td>
+        </tr>
+    </tbody>
+</table>
+
+<!-- We mainly conduct experiments from three aspects: Storage consumption, I/O efficiency and Query Time. -->
+
+### Storage efficiency
+<img src="docs/images/benchmark_storage.png" class="align-center"
+width="700" alt="storage consumption" />
+
+Two baseline approaches are
+considered: 1) “plain”, which employs plain encoding for the
+source and destination columns, and 2) “plain + offset”, which
+extends the “plain” method by sorting edges and adding an
+offset column to mark each vertex’s starting edge position.
+The result
+is a notable storage advantage: on average, GraphAr requires
+only 27.3% of the storage needed by the baseline “plain +
+offset”, which is due to delta encoding.
+
+### I/O speed
+<img src="docs/images/benchmark_IO_time.png" class="align-center"
+width="700" alt="I/O time" />
+
+In (a) indicate that GraphAr significantly
+outperforms the baseline (CSV), achieving an average speedup of 4.9×. In Figure (b), the immutable (“Imm”) and mutable (“Mut”) variants are two native in-memory storage of GraphScope. It demonstrates that although the querying time with GraphAr exceeds that of the in-memory storages, attributable to intrinsic I/O overhead, it significantly surpasses the process of loading and then
+executing the query, by 2.4× and 2.5×, respectively. This indicates that GraphAr is a viable option for executing infrequent queries.
+
+
+<!-- ### Neighbor Retrieval
+<img src="docs/images/benchmark_neighbor_retrival.png" class="align-center"
+width="700" alt="Neighbor retrival" />
+
+We query vertices with the largest
+degree in selected graphs, maintaining edges in CSR-like or CSC-like formats depending on the degree type. GraphAr significantly outperforms the baselines, achieving an average speedup of 4452× over the “plain” method, 3.05× over “plain + offset”, and 1.23× over “delta + offset”. -->
+### Label Filtering
+<img src="docs/images/benchmark_label_simple_filter.png" class="align-center"
+width="700" alt="Simple condition filtering" />
+
+**Performance of simple condition filtering.**
+For each graph, we perform experiments where we consider
+each label individually as the target label for filtering.
+GraphAr consistently outperforms the baselines. On average, it achieves a speedup of 14.8× over the “string” method, 8.9× over the “binary (plain)” method, and 7.4× over the  “binary (RLE)” method.
+
+<img src="docs/images/benchmark_label_complex_filter.png" class="align-center"
+width="700" alt="Complex condition filtering" />
+
+**Performance of complex condition filtering.**
+For each graph,
+we combine two labels by AND or OR as the filtering condition.
+The merge-based decoding method yields the largest gain, where “binary (RLE) + merge” outperforms the “binary (RLE)” method by up to 60.5×.
+<!-- ### Query efficiency
+<table>
+    <caption style="text-align: center;">Query Execution Times (in seconds)</caption>
+    <thead>
+        <tr>
+            <th rowspan="2">Query</th>
+            <th colspan="4" scope="colgroup">SF30</th>
+            <th colspan="4" scope="colgroup">SF100</th>
+            <th colspan="4" scope="colgroup">SF300</th>
+        </tr>
+        <tr>
+            <th>P</th>
+            <th>N</th>
+            <th>A</th>
+            <th>G</th>
+            <th>P</th>
+            <th>N</th>
+            <th>A</th>
+            <th>G</th>
+            <th>P</th>
+            <th>N</th>
+            <th>A</th>
+            <th>G</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>ETL</td>
+            <td>6024</td>
+            <td>390</td>
+            <td>—</td>
+            <td>—</td>
+            <td>17726</td>
+            <td>2094</td>
+            <td>—</td>
+            <td>—</td>
+            <td>OM</td>
+            <td>9122</td>
+            <td>—</td>
+            <td>—</td>
+        </tr>
+        <tr>
+            <td>IS-3</td>
+            <td>1.00</td>
+            <td>0.30</td>
+            <td>0.16</td>
+            <td><strong>0.01</strong></td>
+            <td>6.59</td>
+            <td>2.09</td>
+            <td>0.48</td>
+            <td><strong>0.01</strong></td>
+            <td>OM</td>
+            <td>4.12</td>
+            <td>1.39</td>
+            <td><strong>0.03</strong></td>
+        </tr>
+        <tr>
+            <td>IC-8</td>
+            <td>1.35</td>
+            <td><strong>0.37</strong></td>
+            <td>72.2</td>
+            <td>3.36</td>
+            <td>8.43</td>
+            <td><strong>1.26</strong></td>
+            <td>246</td>
+            <td>6.56</td>
+            <td>OM</td>
+            <td><strong>2.98</strong></td>
+            <td>894</td>
+            <td>23.3</td>
+        </tr>
+        <tr>
+            <td>BI-2</td>
+            <td>125</td>
+            <td>45.0</td>
+            <td>67.7</td>
+            <td><strong>4.30</strong></td>
+            <td>3884</td>
+            <td>1101</td>
+            <td>232</td>
+            <td><strong>16.3</strong></td>
+            <td>OM</td>
+            <td>6636</td>
+            <td>756</td>
+            <td><strong>50.0</strong></td>
+        </tr>
+    </tbody>
+</table>
+<p><strong>Notes: <a href="https://github.com/apache/pinot" target="_blank">Pinot (P)</a>, <a href="https://github.com/neo4j/neo4j" target="_blank">Neo4j (N)</a>, <a href="https://arrow.apache.org/docs/cpp/streaming_execution.html" target="_blank">Acero (A)</a>, and GraphAr (G).
+“OM” denotes failed execution due to out-of-memory errors. 
+While both Pinot and Neo4j are widely-used, they
+are not natively designed for data lakes and require an Extract-Transform-Load (ETL) process for integration. The three representative queries includes neighbor retrieval and label filtering, reference to <a href="https://github.com/ldbc/ldbc_snb_bi" target="_blank">LDBC SNB Business Intelligence</a> and <a href="https://github.com/ldbc/ldbc_snb_interactive_v1_impls" target="_blank">LDBC SNB Interactive v1 </a> workload implementations. </strong></p>
+
+GraphAr significantly outperforms Acero, achieving an
+average speedup of 29.5×. A closer analysis of the results reveals
+that the performance gains stem from the following factors: 1) data
+layout design and encoding/decoding optimizations we proposed,
+to enable efficient neighbor retrieval (IS-3, IC-8, BI-2) and label
+filtering (BI-2); 2) bitmap generation can be utilized in selection steps (IS-3, IC-8, BI-2). -->
+
 ## Libraries
 
 GraphAr offers a collection of libraries for the purpose of reading,
@@ -216,17 +417,26 @@ See [GraphAr Spark
 Library](./maven-projects/spark)
 for details about the Scala with Spark library.
 
-### The Java Library
+### The Java (FFI) Library
 
-> [!NOTE] 
-> The Java library is under development. 
+> [!WARNING] 
+> The Java (FFI) library is no longer being updated. The final version depends on C++ library v0.12.0.
 
-The GraphAr Java library is created with bindings to the C++ library
-(currently at version v0.10.0), utilizing
+The GraphAr Java library was created with bindings to the C++ library
+(currently at version v0.12.0), utilizing
 [Alibaba-FastFFI](https://github.com/alibaba/fastFFI) for
-implementation. See [GraphAr Java
-Library](./maven-projects/java) for
+implementation. See [GraphAr Java Library](./maven-projects/java) for
 details about the building of the Java library.
+
+### The Java Library
+> [!NOTE]
+> The Java library is under development.
+
+Unlike java-FFI, the Java library will be implemented by pure java, which will contain different modules:
+
+- **[java-info](./maven-projects/info)**: Responsible for parsing graphInfo (schema) from YAML files
+- **java-io-xxx**: Responsible for reading graph data from different storage formats (to be implemented)
+- **java-api-xxx**: Provides high level API for graph operations (to be implemented)
 
 ### The Python with PySpark Library
 
@@ -235,8 +445,7 @@ details about the building of the Java library.
 
 The PySpark library is developed as bindings to the GraphAr
 Spark library. See [GraphAr PySpark
-Library](./pyspark)
-for details about the PySpark library.
+Library](./pyspark) for details about the PySpark library.
 
 ## Contributing
 
@@ -244,7 +453,6 @@ for details about the PySpark library.
 - Submit [Issues](https://github.com/apache/incubator-graphar/issues) for bug reports, feature requests.
 - Discuss at [dev mailing list](mailto:dev@graphar.apache.org) ([subscribe](mailto:dev-subscribe@graphar.apache.org?subject=(send%20this%20email%20to%20subscribe)) / [unsubscribe](mailto:dev-unsubscribe@graphar.apache.org?subject=(send%20this%20email%20to%20unsubscribe)) / [archives](https://lists.apache.org/list.html?dev@graphar.apache.org)).
 - Asking questions on [GitHub Discussions](https://github.com/apache/graphar/discussions/new?category=q-a).
-- Join our [Biweekly Community Meeting](https://github.com/apache/incubator-graphar/wiki/GraphAr-Community-Meeting).
 
 ## License
 
@@ -255,115 +463,19 @@ GraphAr.
 
 ## Publication
 
-- Xue Li, Weibin Zeng, Zhibin Wang, Diwen Zhu, Jingbo Xu, Wenyuan Yu,
-  Jingren Zhou. [Enhancing Data Lakes with GraphAr: Efficient Graph Data
-  Management with a Specialized Storage
-  Scheme\[J\]](https://arxiv.org/abs/2312.09577). arXiv preprint
-  arXiv:2312.09577, 2023.
+- Xue Li, Weibin Zeng, Zhibin Wang, Diwen Zhu, Jingbo Xu, Wenyuan Yu, Jingren Zhou. GraphAr: An Efficient Storage Scheme for Graph Data in Data Lakes. PVLDB, 18(3): 530 - 543, 2024.
 
 ```bibtex
-@article{li2023enhancing,
+@article{li2024graphar,
   author = {Xue Li and Weibin Zeng and Zhibin Wang and Diwen Zhu and Jingbo Xu and Wenyuan Yu and Jingren Zhou},
-  title = {Enhancing Data Lakes with GraphAr: Efficient Graph Data Management with a Specialized Storage Scheme},
-  year = {2023},
-  url = {https://doi.org/10.48550/arXiv.2312.09577},
-  doi = {10.48550/ARXIV.2312.09577},
-  eprinttype = {arXiv},
-  eprint = {2312.09577},
-  biburl = {https://dblp.org/rec/journals/corr/abs-2312-09577.bib},
-  bibsource = {dblp computer science bibliography, https://dblp.org}
+  title = {GraphAr: An Efficient Storage Scheme for Graph Data in Data Lakes},
+  journal = {Proceedings of the VLDB Endowment},
+  year = {2024},
+  volume = {18},
+  number = {3},
+  pages = {530--543},
+  publisher = {VLDB Endowment},
 }
 ```
 
-# Graphar
-
-
-
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://gitlab.tcsbank.ru/ext.spobarueva/graphar.git
-git branch -M master
-git push -uf origin master
-```
-
-## Integrate with your tools
-
-- [ ] [Set up project integrations](https://gitlab.tcsbank.ru/ext.spobarueva/graphar/-/settings/integrations)
-
-## Collaborate with your team
-
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+The source code, data, and/or other artifacts of the research paper have been made available at the [research branch](https://github.com/apache/incubator-graphar/tree/research).
