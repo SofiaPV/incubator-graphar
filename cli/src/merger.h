@@ -371,7 +371,7 @@ bool PreProcessArray(
     int64_t length = arr->length();
     bool wrote_tmp_files = false;
 
-    int64_t batch_size = length / num_of_drops;
+    int64_t batch_size = length % num_of_drops == 0 ? length / num_of_drops : length / num_of_drops + 1;
     for(int64_t start = 0; start < length; start += batch_size) {
         int64_t end = std::min(start + batch_size, length);
 
@@ -401,7 +401,7 @@ bool PreProcessArray(
         if(path_to_tmp != "") {
             wrote_tmp_files = WriteMappingNClearVector(edge_to_chunk_mapping, path_to_tmp, num_threads);
             if (wrote_tmp_files)
-                logger("    Wrote mapping to '"+path_to_tmp+"'.");
+                logger("    Wrote ["+std::to_string(start)+", "+std::to_string(end)+"] mapping to '"+path_to_tmp+"'.");
             else {
                 logger("    [ERROR] Could not write mapping to '"+path_to_tmp+"'.");
 
@@ -917,6 +917,7 @@ std::string DoMerge(const py::dict& config_dict)
             // 2.2.4 Work with each adj_lists type required by user
             for (const auto& adj_list : edge.adj_lists) {  // TODO: user demands adj_list that does not exist in original graph
                 logger("    Working with adj_list aligned by "+adj_list.aligned_by);
+                num_threads = omp_get_max_threads();
 
                 auto adj_lst = graphar::CreateAdjacentList(
                                     graphar::OrderedAlignedToAdjListType(adj_list.ordered,
