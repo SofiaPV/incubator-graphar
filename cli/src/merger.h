@@ -345,13 +345,84 @@ bool WriteMappingNClearVector(std::vector<std::vector<std::vector<int64_t>>>& da
     }
 
     if(is_ok) {
-        data.clear();
-        std::vector<std::vector<std::vector<int64_t>>>().swap(data);
+        for(int chunk = 0; chunk < num_of_chunks; ++chunk) {
+            for(int t = 0; t < data.size(); ++t) {
+                data[t][chunk].clear();
+                //std::vector<int64_t>().swap(data[t][chunk]);
+            }
+        }
         return true;
     } else {
         clear_directory(tmp_path);
         return false;
     }
+}
+
+
+template <typename ArrowArrayType>
+bool PreProcessArray(
+    const std::shared_ptr<arrow::Array>& column,
+    std::vector<std::vector<std::vector<int64_t>>>& edge_to_chunk_mapping,
+    std::unordered_map<int64_t, graphar::IdType>& vertex_prop_index_map,
+    int num_threads, int chunk_size, int num_of_drops, std::string path_to_tmp)
+{
+    auto arr = std::static_pointer_cast<ArrowArrayType>(column);
+    const auto* data = arr->raw_values();
+    int64_t length = arr->length();
+    bool wrote_tmp_files = false;
+
+    int64_t batch_size = length / num_of_drops;
+    for(int64_t start = 0; start < length; start += batch_size) {
+        int64_t end = std::min(start + batch_size, length);
+
+        #pragma omp parallel for schedule(static) num_threads(num_threads)
+        for (int64_t i = start; i < end; ++i) {
+
+            int thread_id = omp_get_thread_num();
+            int64_t key = static_cast<int64_t>(data[i]);
+
+            auto val = vertex_prop_index_map.find(key);
+
+            if (val == vertex_prop_index_map.end()) {
+
+                #pragma omp critical
+                {
+                    std::cout << "[Error: mapping] Could not find object in vertex_prop_index_map, row: " << i
+                            << " value: " << key
+                            << " thread: " << thread_id
+                            << std::endl;
+                }
+                continue;
+            }
+
+            edge_to_chunk_mapping[thread_id][val->second / chunk_size].push_back(i);
+        }
+
+        if(path_to_tmp != "") {
+            wrote_tmp_files = WriteMappingNClearVector(edge_to_chunk_mapping, path_to_tmp, num_threads);
+            if (wrote_tmp_files)
+                logger("    Wrote mapping to '"+path_to_tmp+"'.");
+            else {
+                logger("    [ERROR] Could not write mapping to '"+path_to_tmp+"'.");
+
+                // if this is the first chunk, and we have no data on disk
+                if(start == 0) {
+                    path_to_tmp = "";  // we will store everything in memory
+                    logger("    Since writing to tmp folder failed, data will be stored in memory.");
+                } else {
+                    clear_directory(path_to_tmp);
+                    throw std::runtime_error("Could not write files to tmp directory for batch "+std::to_string(start / batch_size + 1)+" (starting from 1). Can't recover.");
+                }
+            }
+        }
+    }
+
+    if(path_to_tmp != "") {
+        edge_to_chunk_mapping.clear();
+        std::vector<std::vector<std::vector<int64_t>>>().swap(edge_to_chunk_mapping);
+    }
+
+    return wrote_tmp_files;
 }
 
 
@@ -887,53 +958,45 @@ std::string DoMerge(const py::dict& config_dict)
                 }
 
                 // use importer approach
+                int num_of_drops = 2;
+                bool wrote_tmp_files = false;
                 logger("    Mapping edge row to its chunk in "+std::to_string(num_threads)+" threads.");
                 if (adj_lst->GetType() == graphar::AdjListType::ordered_by_source ||
                     adj_lst->GetType() == graphar::AdjListType::unordered_by_source)
                 {
                     if (src_prop_type == arrow::Type::INT64) {
-                        PreProcessArray<arrow::Int64Array>(
-                            src_column->chunk(0), edge_to_chunk_mapping,
-                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)), 
-                            num_threads, edge_info->GetSrcChunkSize());
+                        wrote_tmp_files = PreProcessArray<arrow::Int64Array>(
+                                            src_column->chunk(0), edge_to_chunk_mapping,
+                                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)), 
+                                            num_threads, edge_info->GetSrcChunkSize(), num_of_drops, merge_config.tmp_path);
                     }
                     else if (src_prop_type == arrow::Type::INT32) {
-                        PreProcessArray<arrow::Int32Array>(
-                            src_column->chunk(0), edge_to_chunk_mapping,
-                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)), 
-                            num_threads, edge_info->GetDstChunkSize());
+                        wrote_tmp_files = PreProcessArray<arrow::Int32Array>(
+                                            src_column->chunk(0), edge_to_chunk_mapping,
+                                            vertex_prop_index_map.at(std::make_pair(edge.src_type, edge.src_prop)), 
+                                            num_threads, edge_info->GetDstChunkSize(), num_of_drops, merge_config.tmp_path);
                     }
                     else {
                         throw std::runtime_error("Unsupported type");
                     }
                 } else {
                     if (dst_prop_type == arrow::Type::INT64) {
-                        PreProcessArray<arrow::Int64Array>(
-                            dst_column->chunk(0), edge_to_chunk_mapping,
-                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), 
-                            num_threads, edge_info->GetSrcChunkSize());
+                        wrote_tmp_files = PreProcessArray<arrow::Int64Array>(
+                                            dst_column->chunk(0), edge_to_chunk_mapping,
+                                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), 
+                                            num_threads, edge_info->GetSrcChunkSize(), num_of_drops, merge_config.tmp_path);
                     }
                     else if (dst_prop_type == arrow::Type::INT32) {
-                        PreProcessArray<arrow::Int32Array>(
-                            dst_column->chunk(0), edge_to_chunk_mapping,
-                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), 
-                            num_threads, edge_info->GetDstChunkSize());
+                        wrote_tmp_files = PreProcessArray<arrow::Int32Array>(
+                                            dst_column->chunk(0), edge_to_chunk_mapping,
+                                            vertex_prop_index_map.at(std::make_pair(edge.dst_type, edge.dst_prop)), 
+                                            num_threads, edge_info->GetDstChunkSize(), num_of_drops, merge_config.tmp_path);
                     }
                     else {
                         throw std::runtime_error("Unsupported type");
                     }
                 }
                 logger("    Mapping complete.");
-
-                // if tmp_path exists, write down chunks as chunk_i.bin; clear edge_to_chunk_mapping
-                bool wrote_tmp_files = false;
-                if(merge_config.tmp_path != "") {
-                    wrote_tmp_files = WriteMappingNClearVector(edge_to_chunk_mapping, merge_config.tmp_path, num_threads);
-                    if (wrote_tmp_files)
-                        logger("    Wrote mapping to '"+merge_config.tmp_path+"'.");
-                    else
-                        logger("    [ERROR] Could not write mapping to '"+merge_config.tmp_path+"'. Using in-memory vector.");
-                }
 
                 // Edges are sorted by their chunks, we only need to:
                 // 1) Sort them the same way as in the original adj_lists (read only one edge chunk for that).
