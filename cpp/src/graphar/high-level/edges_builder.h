@@ -391,10 +391,6 @@ class EdgesBuilder {
     return num_edges_;
   }
 
-//  IdType GetPreNum() const { return pre_num_edges_; }
-
-//  IdType GetPreNum() const { return pre_num_edges_; }
-
   /**
    * @brief Dump the collection into files.
    *

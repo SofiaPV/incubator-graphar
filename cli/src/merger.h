@@ -36,16 +36,16 @@ struct EdgeSmall {
     }
 };
 
-int extract_tailing_number(const std::filesystem::path& filename) {
+std::optional<int> extract_tailing_number(const std::filesystem::path& filename) {
     std::string name = filename.stem().string();
 
-    int end = name.size() - 1;
+    int end = static_cast<int>(name.size()) - 1;
     while (end >= 0 && std::isdigit(static_cast<unsigned char>(name[end]))) {
         end--;
     }
 
     if (end == static_cast<int>(name.size()) - 1)
-        return -1;  // chunks have only positive numbers
+        return std::nullopt;
 
     std::string number = name.substr(end + 1);
     return std::stoi(number);
@@ -61,7 +61,6 @@ public:
         while (pos_ >= data_[th][idx_].size()) {
             // clear used data (we guarantee, that no other thread will ever need this data)
             data_[th][idx_].clear();
-            std::vector<int64_t>().swap(data_[th][idx_]);
 
             // move to the next thread output
             ++th; 
@@ -104,9 +103,8 @@ void MapPK2row(const std::shared_ptr<arrow::ChunkedArray>& column,
         const auto* data = arr->raw_values();
 
         for (int64_t i = 0; i < arr->length(); ++i) {
-            map[static_cast<int64_t>(data[i])] = row_offset + i;
+            map[static_cast<int64_t>(data[i])] = row_offset++;
         }
-        row_offset += arr->length();
     }
 }
 
@@ -122,15 +120,20 @@ void MapValues(const std::string& key_column_name,
     auto key_col_ptr = table->GetColumnByName(key_column_name);
     auto val_col_ptr = table->GetColumnByName(value_column_name);
 
-    if (!key_col_ptr || !val_col_ptr) {
-        throw std::runtime_error("MapValues(): One of the columns not found in table");
+    if (!key_col_ptr) {
+        throw std::runtime_error("MapValues(): key column '" + key_column_name + "' not found in table");
+    }
+    if (!val_col_ptr) {
+        throw std::runtime_error("MapValues(): value column '" + value_column_name + "' not found in table");
     }
 
     auto key_chunk = std::static_pointer_cast<KeyColumnType>(key_col_ptr->chunk(0));
     auto val_chunk = std::static_pointer_cast<ValueColumnType>(val_col_ptr->chunk(0));
 
     if (key_chunk->length() != val_chunk->length()) {
-        throw std::runtime_error("MapValues(): Key and value columns lengths do not match");
+        throw std::runtime_error("MapValues(): Key and value column lengths do not match (" 
+                                 + std::to_string(key_chunk->length()) + "!=" 
+                                 + std::to_string(val_chunk->length()) + ")");
     }
 
     for (int64_t i = 0; i < key_chunk->length(); ++i) {
@@ -348,7 +351,6 @@ bool WriteMappingNClearVector(std::vector<std::vector<std::vector<int64_t>>>& da
         for(int chunk = 0; chunk < num_of_chunks; ++chunk) {
             for(int t = 0; t < data.size(); ++t) {
                 data[t][chunk].clear();
-                //std::vector<int64_t>().swap(data[t][chunk]);
             }
         }
         return true;
@@ -532,7 +534,7 @@ std::string DoMerge(const py::dict& config_dict)
 
         // 1.3.3 Read new data
         std::vector<std::shared_ptr<arrow::Table>> vertex_tables;
-        for(Source source : vertex.sources) {
+        for(const Source& source : vertex.sources) {
             // Read source's column names
             std::vector<std::string> new_column_names;
             for (const auto& [key, value] : source.columns) {
@@ -625,7 +627,11 @@ std::string DoMerge(const py::dict& config_dict)
             std::shared_ptr<arrow::ChunkedArray> vertex_chunk_column = 
                             GetDataFromParquetFile(file.path().string(), column_names)->column(0);
             arrow::Int64Builder builder;
-            int vertex_chunk_idx = extract_tailing_number(file);
+            std::optional<int> vertex_chunk_idx = extract_tailing_number(file);
+            if(!vertex_chunk_idx.has_value()) {  // in case we change format and other files will appear in the same directory
+                logger("  [WARNING] Found file with no tailing number in graph's vertex.");
+                continue;
+            }
 
             // for each PK find the corresponding line number in additional attributes
             switch(vertex_chunk_column->chunk(0)->type_id()) {
@@ -651,7 +657,7 @@ std::string DoMerge(const py::dict& config_dict)
             // Write table
             for (const auto& property_group : pgs) {
                 vertex_prop_writer->WriteTable(sorted_chunk, property_group,
-                                                vertex_chunk_idx);
+                                                vertex_chunk_idx.value());
             }
         }
         logger("  Processed vertex <"+vertex.type+">.");  // TODO: pause for 1.5 minutes, why?
@@ -1023,14 +1029,18 @@ std::string DoMerge(const py::dict& config_dict)
                 for (int64_t i = 0; i < parts.size(); ++i) {
 
                     auto& edge_chunk_path = parts[i];
-                    int64_t edge_chunk_idx = extract_tailing_number(edge_chunk_path);
-                    std::string path_to_mapping = make_mapping_path(merge_config.tmp_path, edge_chunk_idx);
+                    std::optional<int> edge_chunk_idx = extract_tailing_number(edge_chunk_path);
+                    if(!edge_chunk_idx.has_value()) {
+                        logger("  [WARNING] Found edge chunk with no tailing number.");
+                        continue;
+                    }
+                    std::string path_to_mapping = make_mapping_path(merge_config.tmp_path, edge_chunk_idx.value());
 
                     // calculate number of edges
                     int64_t num_of_edges_in_chunk = 0;
                     if(!wrote_tmp_files) {
                         for(int thread = 0; thread < edge_to_chunk_mapping.size(); ++thread) {
-                            num_of_edges_in_chunk += edge_to_chunk_mapping[thread][edge_chunk_idx].size();
+                            num_of_edges_in_chunk += edge_to_chunk_mapping[thread][edge_chunk_idx.value()].size();
                         }
                     } else {
                         num_of_edges_in_chunk = get_count_bin(path_to_mapping);
@@ -1039,7 +1049,7 @@ std::string DoMerge(const py::dict& config_dict)
                     // collect edges by edge_chunk_idx, sort them
                     std::vector<EdgeSmall> new_chunk_edges;
                     if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT64)
-                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx,
+                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx.value(),
                         [&](auto& s) {
                             ExtractEdges<arrow::Int64Array, arrow::Int64Array>(
                                 s, src_column, dst_column, 
@@ -1049,7 +1059,7 @@ std::string DoMerge(const py::dict& config_dict)
                             );
                         });
                     else if (src_prop_type == arrow::Type::INT64 && dst_prop_type == arrow::Type::INT32)
-                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx,
+                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx.value(),
                         [&](auto& s) {
                             ExtractEdges<arrow::Int32Array, arrow::Int64Array>(
                                 s, src_column, dst_column, 
@@ -1059,7 +1069,7 @@ std::string DoMerge(const py::dict& config_dict)
                             );
                         });
                     else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT64)
-                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx,
+                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx.value(),
                         [&](auto& s) {
                             ExtractEdges<arrow::Int64Array, arrow::Int32Array>(
                                 s, src_column, dst_column, 
@@ -1069,7 +1079,7 @@ std::string DoMerge(const py::dict& config_dict)
                             );
                         });
                     else if (src_prop_type == arrow::Type::INT32 && dst_prop_type == arrow::Type::INT32)
-                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx,
+                        with_streamer(wrote_tmp_files, edge_to_chunk_mapping, path_to_mapping, edge_chunk_idx.value(),
                         [&](auto& s) {
                             ExtractEdges<arrow::Int32Array, arrow::Int32Array>(
                                 s, src_column, dst_column, 
@@ -1130,8 +1140,13 @@ std::string DoMerge(const py::dict& config_dict)
                         auto sorted_chunk = arrow::compute::Take(pg_data_table, indices_order, options).ValueOrDie().table();
 
                         // write them down
+                        std::optional<int> chunk_tailing_number = extract_tailing_number(chunk);
+                        if (!chunk_tailing_number.has_value()) {
+                            logger("  [WARNING] Found file in edge chunk with no tailing number.");
+                            continue;
+                        }
                         auto status = edge_writer.WritePropertyChunk(sorted_chunk, updated_edge_info->GetPropertyGroup(pg.properties[0].name), 
-                                                                     edge_chunk_idx, extract_tailing_number(chunk), 
+                                                                     edge_chunk_idx.value(), chunk_tailing_number.value(), 
                                                                      StringToValidateLevel(edge.validate_level));
 
                         if(!status.ok()) {

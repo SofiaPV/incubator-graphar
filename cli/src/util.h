@@ -348,6 +348,11 @@ std::shared_ptr<arrow::Table> GetDataFromFile(
 
 
 /*==================== Bin files in-out functions & settings ====================*/
+
+#if __BYTE_ORDER != __LITTLE_ENDIAN
+#  error "Unsupported endianness (only little endian is supported)"
+#endif
+
 struct BinHeader {
     uint32_t magic = 0x42494E31;
     uint64_t count = 0;
@@ -374,7 +379,7 @@ void clear_file(const std::string& path) {
     std::error_code ec;
     if (!fs::remove(path, ec)) {
         if (ec) {
-            throw std::runtime_error("remove failed: " + ec.message());  // data will be wrong -> fail
+            throw std::runtime_error("remove failed: " + ec.message());
         }
     }
 }
