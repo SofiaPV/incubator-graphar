@@ -660,6 +660,7 @@ std::shared_ptr<arrow::Table> ChangeNameAndDataType(
           // Perform type casting using Compute API
           arrow::compute::CastOptions cast_options;
           cast_options.allow_int_overflow = false;  // Set as needed
+          cast_options.allow_time_truncate = true;
 
           auto cast_result =
               arrow::compute::Cast(*chunk, new_type, cast_options);
